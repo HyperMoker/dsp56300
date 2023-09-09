@@ -23,39 +23,92 @@ namespace dsp56k
 			return m;
 		}
 
-		static void updateAddressRegister( TWord& r, int n, TWord m, TWord moduloMask, int32_t modulo )
+		template<bool add>
+		static void updateAddressRegister( TWord& r, TWord n, TWord m, TWord moduloMask, int32_t modulo )
 		{
 			// modulo or linear addressing
 			if (moduloMask)
 			{
-				n=signextend<int,24>(n);
-				if( abs(n) >= modulo )	// linear addressing OR modulo with increment exceeding modulo.
+				if (modulo == -1)	// Multiple-wrap-around.
 				{
-					// the doc says it's only valid for N = P x (2 pow k), but assume the assembly is okay
-//						LOG( "r " << std::hex << r << " + n " << std::hex << n << " = " << std::hex << ((r+n)&0x00ffffff) );
+					auto temp = r & moduloMask;
+					r ^= temp;
+					if constexpr (add)
+						temp += n;
+					else
+						temp -= n;
+					temp &= moduloMask;
+					r |= temp;
+					return;
+				}
+
+
+				n = signextend<int, 24>(n);
+
+				const auto lowerBound = r & ~moduloMask;
+				const auto upperBound = lowerBound + m;
+
+				if constexpr(add)
 					r += n;
-					r &= 0x00ffffff;
+				else
+					r -= n;
+
+				modulo = n & moduloMask ? modulo : 0;
+
+				if(r < lowerBound)
+					r += modulo;
+				if(r > upperBound)
+					r -= modulo;
+				/*
+				if constexpr(add)
+				{
+					r += n;
+					n &= moduloMask;
+					r -= n;
 				}
 				else
 				{
-					// If (rOffset<0) then bit 31 of rOffset is set. Shift it down 31 places to get -1. Otherwise you have 0.
-					// and this value with modulo to get either modulo or zero. Add to rOffset.
-					// If (moduloTest-rOffset<0) (rOffset>moduloTest) (i.e. rOffset exceeds moduloTest), do the same trick.
-					const int32_t p				= (r&moduloMask) + n;
-					const int32_t mt			= m - p;
-					r							+= n + ((p>>31) & modulo) - (((mt)>>31) & modulo);
+					r -= n;
+					n &= moduloMask;
+					r += n;
 				}
-			}
+
+				// If (rOffset<0) then bit 31 of rOffset is set. Shift it down 31 places to get -1. Otherwise you have 0.
+				// and this value with modulo to get either modulo or zero. Add to rOffset.
+				// If (moduloTest-rOffset<0) (rOffset>moduloTest) (i.e. rOffset exceeds moduloTest), do the same trick.
+				if constexpr(add)
+				{
+					const int32_t p				= (r & moduloMask) + n;
+					const int32_t mt			= static_cast<int32_t>(m) - p;
+					r += n;
+					r += (p>>31) & modulo;
+					r -= (mt>>31) & modulo;
+				}
+				else
+				{
+					const int32_t p				= (r & moduloMask) - n;
+					const int32_t mt			= static_cast<int32_t>(m) - p;
+					r -= n;
+					r += (p>>31) & modulo;
+					r -= (mt>>31) & modulo;
+				}
+*/			}
 			else	// bit-reverse mode
 			{
-				assert( 0 && "bitreverse mode is used" );
+//				const auto or = r;
+//				const auto on = n;
 
 				r = bitreverse24(r);
 				n = bitreverse24(n);
-				r += n;
-				r &= 0x00ffffff;
+//				LOG("BitReverse r=" << HEX(or) << ", n=" << HEX(on) << ", rr=" << HEX(r) << ", rn=" << HEX(n) << ", resRev=" << HEX(r+n) << ", res=" << HEX(bitreverse24(r+n)));
+				if constexpr(add)
+					r += n;
+				else
+					r -= n;
 				r = bitreverse24(r);
 			}
+
+			r &= 0x00ffffff;
 		}
 	};
 };

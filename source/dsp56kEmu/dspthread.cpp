@@ -2,16 +2,31 @@
 
 #include <iostream>
 
+#include "debuggerinterface.h"
 #include "dsp.h"
+#include "threadtools.h"
 
-#ifdef WIN32
-#include <Windows.h>
+#if DSP56300_DEBUGGER
+#include "dsp56kDebugger/debugger.h"
 #endif
 
 namespace dsp56k
 {
-	DSPThread::DSPThread(DSP& _dsp): m_dsp(_dsp), m_runThread(true)
+	void defaultCallback(uint32_t)
 	{
+	}
+
+	DSPThread::DSPThread(DSP& _dsp, const char* _name/* = nullptr*/, std::shared_ptr<DebuggerInterface> _debugger/* = {}*/)
+		: m_dsp(_dsp)
+		, m_name(_name ? _name : std::string())
+		, m_runThread(true)
+		, m_debugger(std::move(_debugger))
+	{
+		if(m_debugger)
+			setDebugger(m_debugger.get());
+
+		setCallback(defaultCallback);
+
 		m_thread.reset(new std::thread([this]
 		{
 			threadFunc();
@@ -28,30 +43,64 @@ namespace dsp56k
 		if(!m_thread)
 			return;
 
+		if(m_debugger)
+			detachDebugger(m_debugger.get());
+
 		m_runThread = false;
 
 		m_dsp.terminate();
 
 		m_thread->join();
 		m_thread.reset();
+
+		m_debugger.reset();
+	}
+
+	void DSPThread::setCallback(const Callback& _callback)
+	{
+		const Callback c = _callback ? _callback : defaultCallback;
+
+		Guard g(m_mutex);
+		m_callback = c;
+	}
+
+	void DSPThread::setDebugger(DebuggerInterface* _debugger)
+	{
+		std::lock_guard lock(m_debuggerMutex);
+		if(m_nextDebugger)
+			m_nextDebugger->setDspThread(nullptr);
+		m_nextDebugger = _debugger;
+		if(m_nextDebugger)
+			m_nextDebugger->setDspThread(this);
+	}
+
+	void DSPThread::detachDebugger(const DebuggerInterface* _debugger)
+	{
+		std::lock_guard lock(m_debuggerMutex);
+		if(m_nextDebugger == _debugger)
+			setDebugger(nullptr);
 	}
 
 	void DSPThread::threadFunc()
 	{
 #ifdef _WIN32
-		::SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+		ThreadTools::setCurrentThreadPriority(ThreadPriority::Highest);
+		ThreadTools::setCurrentThreadName(m_name.empty() ? "DSP" : "DSP " + m_name);
 #endif
-		size_t instructions = 0;
-		size_t counter = 0;
+		uint64_t instructions = 0;
+		uint64_t counter = 0;
+
+		uint64_t totalInstructions = 0;
 
 		using Clock = std::chrono::high_resolution_clock;
 
 		auto t = Clock::now();
+		const auto tStart = t;
 
 #ifdef _DEBUG
-		const size_t ipsStep = 0x0400000;
+		constexpr size_t ipsStep = 0x0400000;
 #else
-		const size_t ipsStep = 0x2000000;
+		constexpr size_t ipsStep = 0x2000000;
 #endif
 		while(m_runThread)
 		{
@@ -72,27 +121,49 @@ namespace dsp56k
 					m_dsp.exec();
 				}
 
-				instructions += m_dsp.getInstructionCounter() - iBegin;
+				const auto iEnd = m_dsp.getInstructionCounter();
+
+				const auto d = delta(iEnd, iBegin);
+
+				instructions += d;
+				totalInstructions += d;
+
 				counter += 128;
+
+				m_callback(d);
+
+#if DSP56300_DEBUGGER
+				m_dsp.setDebugger(m_nextDebugger);
+#endif
 			}
 
 			if((counter & (ipsStep-1)) == 0)
 			{
 				const auto t2 = Clock::now();
 				const auto d = t2 - t;
+				const auto dTotal = t2 - tStart;
 
 				const auto ms = std::chrono::duration_cast<std::chrono::microseconds>(d);
+				const auto msTotal = std::chrono::duration_cast<std::chrono::microseconds>(dTotal);
 
-				const auto ips = static_cast<double>(instructions) / static_cast<double>(ms.count());
+				m_currentMips = static_cast<double>(instructions) / static_cast<double>(ms.count());
+				m_averageMips = static_cast<double>(totalInstructions) / static_cast<double>(msTotal.count());
 
 				instructions = 0;
 				t = t2;
 
-				char temp[64];
-				sprintf(temp, "MIPS: %.6f", ips);
-				puts(temp);
-				LOG(temp);
+				if(!m_name.empty())
+					sprintf(m_mipsString, "[%s] MIPS: %.6f (%.6f average)", m_name.c_str(), m_currentMips, m_averageMips);
+				else
+					sprintf(m_mipsString, "MIPS: %.6f (%.6f average)", m_currentMips, m_averageMips);
+
+				if(m_logToStdout)
+					puts(m_mipsString);
+				if(m_logToDebug)
+					LOG(m_mipsString);
 			}
 		}
+
+		m_dsp.setDebugger(m_nextDebugger);
 	}
 }
