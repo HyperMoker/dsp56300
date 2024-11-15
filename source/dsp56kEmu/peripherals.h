@@ -6,7 +6,6 @@
 #include "essi.h"
 #include "gpio.h"
 #include "hdi08.h"
-#include "hi08.h"
 #include "opcodetypes.h"
 #include "timers.h"
 #include "types.h"
@@ -18,8 +17,10 @@ namespace dsp56k
 
 	enum XIO
 	{
-		XIO_Reserved_High_First	= 0xffff80,	// 24 bit mode
-		XIO_Reserved_High_Last	= 0xffffff,
+		XIO_Reserved_High_First		= 0xffff80,							// 24 bit mode - SC bit clear
+		XIO_Reserved_High_First_16	= XIO_Reserved_High_First & 0xffff,	// 16 bit mode - SC bit set
+
+		XIO_Reserved_High_Last		= 0xffffff,
 
 		// DMA
 		XIO_DCR5				= 0xffffd8,	// DMA 5 Control Register
@@ -79,42 +80,53 @@ namespace dsp56k
 	class IPeripherals
 	{
 	public:
+		static constexpr uint32_t MaxDelayCycles = 16384;
+
 		virtual ~IPeripherals() = default;
 
-		void setDSP(DSP* _dsp)
+		virtual void setDSP(DSP* _dsp)
 		{
 			m_dsp = _dsp;
 		}
 
-		DSP& getDSP()
-		{
-			return *m_dsp;
-		};
+		DSP& getDSP() const		{ return *m_dsp; }
+		bool hasDSP() const		{ return m_dsp != nullptr; }
 
 		virtual TWord read(TWord _addr, Instruction _inst) = 0;
 		virtual const TWord* readAsPtr(TWord _addr, Instruction _inst) = 0;
 		virtual void write(TWord _addr, TWord _value) = 0;
-		virtual void exec() = 0;
 		virtual void reset() = 0;
 		virtual void setSymbols(Disassembler& _disasm) const = 0;
 		virtual void terminate() = 0;
 
+		void setDelayCycles(const uint32_t _delayCycles);
+
+		void resetDelayCycles(const uint32_t _delayCycles);
+
+		uint32_t getDelayCycles() const { return m_delayCycles; }
+		auto getTargetClock() const { return m_targetClock; }
+
 	private:
 		DSP* m_dsp = nullptr;
+		uint32_t m_delayCycles = 0;
+		uint64_t m_targetClock = 0;
 	};
 
-	class PeripheralsNop : public IPeripherals
+	class PeripheralsNop final : public IPeripherals
 	{
+	public:
+		uint32_t exec() { return MaxDelayCycles; }
+
+	private:
 		TWord read(TWord _addr, Instruction _inst) override { return 0; }
 		const TWord* readAsPtr(TWord _addr, Instruction _inst) override { return nullptr; }
 		void write(TWord _addr, TWord _value) override {}
-		void exec() override {}
 		void reset() override {}
 		void setSymbols(Disassembler& _disasm) const override {}
 		void terminate() override {}
 	};
 
-	class Peripherals56303 : public IPeripherals
+	class Peripherals56303 final : public IPeripherals
 	{
 		// _____________________________________________________________________________
 		// members
@@ -128,27 +140,45 @@ namespace dsp56k
 		Peripherals56303();
 		
 		TWord read(TWord _addr, Instruction _inst) override;
-		const TWord* readAsPtr(TWord _addr, Instruction _inst) override { return nullptr; }
+		const TWord* readAsPtr(TWord _addr, Instruction _inst) override;
 		void write(TWord _addr, TWord _val) override;
 
-		void exec() override;
+		uint32_t exec();
 		void reset() override;
 
-		Essi& getEssi()	{ return m_essi; }
-		HI08& getHI08()	{ return m_hi08; }
+		void setDSP(DSP* _dsp) override
+		{
+			IPeripherals::setDSP(_dsp);
 
-		void setSymbols(Disassembler& _disasm) const override {}
+			m_timers.setDSP(_dsp);
+			m_essiClock.setDSP(_dsp);
+			m_essi0.setDSP(_dsp);
+			m_essi1.setDSP(_dsp);
+		}
 
-		void terminate() override {};
+		Dma& getDMA()					{ return m_dma; }
+		auto& getEssiClock()			{ return m_essiClock; }
+		Essi& getEssi0()				{ return m_essi0; }
+		Essi& getEssi1()				{ return m_essi1; }
+		HDI08& getHI08()				{ return m_hi08; }
+		const Timers& getTimers() const	{ return m_timers; }
+
+		void setSymbols(Disassembler& _disasm) const override;
+
+		void terminate() override;
 
 	private:
-		Essi m_essi;
-		HI08 m_hi08;
+		Dma m_dma;
+		EssiClock m_essiClock;
+		Essi m_essi0;
+		Essi m_essi1;
+		HDI08 m_hi08;
+		Timers m_timers;
 	};
 
 	class Peripherals56367;
 
-	class Peripherals56362 : public IPeripherals
+	class Peripherals56362 final : public IPeripherals
 	{
 		// _____________________________________________________________________________
 		// members
@@ -165,14 +195,15 @@ namespace dsp56k
 		const TWord* readAsPtr(TWord _addr, Instruction _inst) override;
 		void write(TWord _addr, TWord _val) override;
 
-		void exec() override;
+		uint32_t exec();
 		void reset() override;
 
-		EsaiClock& getEsaiClock()	{ return m_esaiClock; }
-		Esai& getEsai()				{ return m_esai; }
-		HDI08& getHDI08()			{ return m_hdi08; }
-		Dma& getDMA()				{ return m_dma; }
-		EsaiPortC& getPortC()		{ return m_portC; }
+		EsaiClock& getEsaiClock()		{ return m_esaiClock; }
+		Esai& getEsai()					{ return m_esai; }
+		HDI08& getHDI08()				{ return m_hdi08; }
+		Dma& getDMA()					{ return m_dma; }
+		EsaiPortC& getPortC()			{ return m_portC; }
+		const Timers& getTimers() const	{ return m_timers; }
 
 		void setSymbols(Disassembler& _disasm) const override;
 
@@ -182,6 +213,8 @@ namespace dsp56k
 		{
 			m_disableTimers = _disable;
 		}
+
+		void setDSP(DSP* _dsp) override;
 
 	private:
 		Dma m_dma;
@@ -193,7 +226,7 @@ namespace dsp56k
 		bool m_disableTimers;
 	};
 
-	class Peripherals56367 : public IPeripherals
+	class Peripherals56367 final : public IPeripherals
 	{
 	public:
 		Peripherals56367();
@@ -202,14 +235,21 @@ namespace dsp56k
 		const TWord* readAsPtr(TWord _addr, Instruction _inst) override { return nullptr; }
 		void write(TWord _addr, TWord _val) override;
 
-		void exec() override;
-		void reset() override;
+		uint32_t exec() const { return MaxDelayCycles; }
+
+		void reset() override {}
 
 		Esai& getEsai() { return m_esai; }
 
 		void setSymbols(Disassembler& _disasm) const override;
 
 		void terminate() override;
+
+		void setDSP(DSP* _dsp) override
+		{
+			IPeripherals::setDSP(_dsp);
+			m_esai.setDSP(_dsp);
+		}
 
 	private:
 		std::array<TWord, XIO_Reserved_High_Last - XIO_Reserved_High_First + 1> m_mem;

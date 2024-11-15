@@ -459,17 +459,24 @@ namespace dsp56k
 				if (_accumulate)
 					signextend56to64(d);
 
-				// fractional multiplication requires one post-shift to be correct
-				m_asm.add(r64(_s1), r64(_s1));	// add r,r is faster than shl r,1 on Haswell, can run on more ports and has a TP of 0.25 vs 0.5
-
-				if(_negate && _accumulate)
-					m_asm.sub(d, r64(_s1));
-				else if (_accumulate)
-					m_asm.add(d, r64(_s1));
+				if(_accumulate && !_negate)
+				{
+					m_asm.lea(d, asmjit::x86::ptr(d, r64(_s1), 1));
+				}
 				else
 				{
-					m_asm.neg(r64(_s1));
-					m_asm.mov(d, r64(_s1));
+					// fractional multiplication requires one post-shift to be correct
+					m_asm.add(r64(_s1), r64(_s1));	// add r,r is faster than shl r,1 on Haswell, can run on more ports and has a TP of 0.25 vs 0.5
+
+					if(_accumulate && _negate)
+					{
+						m_asm.sub(d, r64(_s1));
+					}
+					else/* if(_negate)*/
+					{
+						m_asm.neg(r64(_s1));
+						m_asm.mov(d, r64(_s1));
+					}
 				}
 			}
 		}
@@ -742,7 +749,7 @@ namespace dsp56k
 
 		AluReg s(m_block, abSrc, abSrc != abDst);
 #ifdef HAVE_X86_64
-		if (m_asm.hasBMI2())
+		if (JitEmitter::hasBMI2())
 		{
 			m_asm.shrx(s, s, offset.get());
 		}
@@ -1003,6 +1010,45 @@ namespace dsp56k
 	{
 	}
 
+	void JitOps::op_Normf(TWord op)
+	{
+		// if S[23] == 0
+		//     ASR S,D
+		// else
+		//     ASL -S,D
+
+		const auto sss = getFieldValue(Normf, Field_sss, op);
+		const auto D = getFieldValue(Normf, Field_D, op);
+
+		AluRef alu(m_block, D, true, true);
+		alu.get();	// force to lock already now
+
+		DspValue src(m_block);
+		decode_sss_read(src, sss);
+
+		const ShiftReg shifter(m_block);
+		m_asm.mov(r32(shifter), r32(src));
+
+		const auto asl = m_asm.newLabel();
+		const auto end = m_asm.newLabel();
+
+		m_asm.bitTest(shifter, 23);
+		m_asm.jnz(asl);
+
+		// ASR
+		alu_asr(D, D, &shifter);
+		m_asm.jmp(end);
+
+		// ASL
+		m_asm.bind(asl);
+		m_asm.shl(r32(shifter), asmjit::Imm(8));
+		m_asm.neg(shifter);
+		m_asm.shr(r32(shifter), asmjit::Imm(8));
+		alu_asl(D,D, &shifter);
+
+		m_asm.bind(end);
+	}
+
 	void JitOps::op_Or_SD(TWord op)
 	{
 		const auto D = getFieldValue<Or_SD, Field_d>(op);
@@ -1113,8 +1159,7 @@ namespace dsp56k
 
 		AluRef r(m_block, ab, true, true);
 
-		const RegGP temp(m_block);
-		decode_JJJ_read_56(temp, JJJ, !ab);
+		const DspValue temp = decode_JJJ_read_56(JJJ, !ab);
 
 		m_asm.cmov(decode_cccc(cccc), r64(r), r64(temp));
 	}
@@ -1130,8 +1175,7 @@ namespace dsp56k
 		AluRef r(m_block, ab, true, true);
 		r.get();	// force load
 
-		const RegGP temp(m_block);
-		decode_JJJ_read_56(temp, JJJ, !ab);
+		const auto temp = decode_JJJ_read_56(JJJ, !ab);
 
 		const DspValue src = makeDspValueRegR(m_block, ttt);
 		const DspValue dst = makeDspValueRegR(m_block, TTT, true, true);

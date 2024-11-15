@@ -1,6 +1,7 @@
 #pragma once
 
 #include "buildconfig.h"
+#include "types.h"
 
 // set to 1 to compile for ARM even if on an x64 system
 #if 0
@@ -8,12 +9,18 @@
 #undef HAVE_X86_64
 #endif
 
+namespace dsp56k
+{
+	class Jit;
+	typedef void (*TJitFunc)(Jit*, TWord);
+}
+
 #if defined(HAVE_ARM64)
 #include "asmjit/arm/a64operand.h"
 
 namespace asmjit
 {
-	inline namespace _abi_1_9
+	inline namespace ASMJIT_ABI_NAMESPACE
 	{
 		namespace a64
 		{
@@ -29,10 +36,10 @@ namespace dsp56k
 	using JitMemPtr = asmjit::arm::Mem;
 
 	using JitReg = asmjit::arm::Reg;
-	using JitRegGP = asmjit::arm::Gp;
-	using JitReg32 = asmjit::arm::GpW;
-	using JitReg64 = asmjit::arm::GpX;
-	using JitReg128 = asmjit::arm::VecV;
+	using JitRegGP = asmjit::a64::Gp;
+	using JitReg32 = asmjit::a64::GpW;
+	using JitReg64 = asmjit::a64::GpX;
+	using JitReg128 = asmjit::a64::VecV;
 	using JitCondCode = asmjit::arm::CondCode;
 }
 #else
@@ -40,7 +47,7 @@ namespace dsp56k
 
 namespace asmjit
 {
-	inline namespace _abi_1_9
+	inline namespace ASMJIT_ABI_NAMESPACE
 	{
 		namespace x86
 		{

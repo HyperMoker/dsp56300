@@ -22,6 +22,9 @@ namespace dsp56k
 		, m_runThread(true)
 		, m_debugger(std::move(_debugger))
 	{
+#ifdef _WIN32
+		m_logToStdout = true;
+#endif
 		if(m_debugger)
 			setDebugger(m_debugger.get());
 
@@ -46,14 +49,19 @@ namespace dsp56k
 		if(m_debugger)
 			detachDebugger(m_debugger.get());
 
-		m_runThread = false;
-
-		m_dsp.terminate();
+		terminate();
 
 		m_thread->join();
 		m_thread.reset();
 
 		m_debugger.reset();
+	}
+
+	void DSPThread::terminate()
+	{
+		m_runThread = false;
+
+		m_dsp.terminate();
 	}
 
 	void DSPThread::setCallback(const Callback& _callback)
@@ -83,14 +91,15 @@ namespace dsp56k
 
 	void DSPThread::threadFunc()
 	{
-#ifdef _WIN32
 		ThreadTools::setCurrentThreadPriority(ThreadPriority::Highest);
 		ThreadTools::setCurrentThreadName(m_name.empty() ? "DSP" : "DSP " + m_name);
-#endif
+
 		uint64_t instructions = 0;
+		uint64_t cycles = 0;
 		uint64_t counter = 0;
 
 		uint64_t totalInstructions = 0;
+		uint64_t totalCycles = 0;
 
 		using Clock = std::chrono::high_resolution_clock;
 
@@ -108,6 +117,7 @@ namespace dsp56k
 				Guard g(m_mutex);
 
 				const auto iBegin = m_dsp.getInstructionCounter();
+				const auto cBegin = m_dsp.getCycles();
 
 				for(size_t i=0; i<128; i += 8)
 				{
@@ -122,15 +132,20 @@ namespace dsp56k
 				}
 
 				const auto iEnd = m_dsp.getInstructionCounter();
+				const auto cEnd = m_dsp.getCycles();
 
-				const auto d = delta(iEnd, iBegin);
+				const auto di = iEnd - iBegin;
+				const auto dc = cEnd - cBegin;
 
-				instructions += d;
-				totalInstructions += d;
+				instructions += di;
+				totalInstructions += di;
+
+				cycles += dc;
+				totalCycles += dc;
 
 				counter += 128;
 
-				m_callback(d);
+				m_callback(static_cast<uint32_t>(di));
 
 #if DSP56300_DEBUGGER
 				m_dsp.setDebugger(m_nextDebugger);
@@ -149,13 +164,18 @@ namespace dsp56k
 				m_currentMips = static_cast<double>(instructions) / static_cast<double>(ms.count());
 				m_averageMips = static_cast<double>(totalInstructions) / static_cast<double>(msTotal.count());
 
+				m_currentMcps = static_cast<double>(cycles) / static_cast<double>(ms.count());
+				m_averageMcps = static_cast<double>(totalCycles) / static_cast<double>(msTotal.count());
+
 				instructions = 0;
+				cycles = 0;
+
 				t = t2;
 
 				if(!m_name.empty())
-					sprintf(m_mipsString, "[%s] MIPS: %.6f (%.6f average)", m_name.c_str(), m_currentMips, m_averageMips);
+					snprintf(m_mipsString, std::size(m_mipsString), "[%s] MIPS: %.4f (%.4f avg), MHz: %.4f (%.4f avg)", m_name.c_str(), m_currentMips, m_averageMips, m_currentMcps, m_averageMcps);
 				else
-					sprintf(m_mipsString, "MIPS: %.6f (%.6f average)", m_currentMips, m_averageMips);
+					snprintf(m_mipsString, std::size(m_mipsString), "MIPS: %.4f (%.4f avg), MHz: %.4f (%.4f avg)", m_currentMips, m_averageMips, m_currentMcps, m_averageMcps);
 
 				if(m_logToStdout)
 					puts(m_mipsString);
@@ -165,5 +185,7 @@ namespace dsp56k
 		}
 
 		m_dsp.setDebugger(m_nextDebugger);
+
+		m_runThread = true;
 	}
 }

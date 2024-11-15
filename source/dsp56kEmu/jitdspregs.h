@@ -44,8 +44,6 @@ namespace dsp56k
 		void clrALU(TWord _alu) const;
 
 		void getXY(const JitRegGP& _dst, TWord _xy) const;
-		JitRegGP getXY(TWord _xy, AccessType _access) const;
-		void setXY(uint32_t _xy, const JitRegGP& _src) const;
 
 		void getEP(DspValue& _dst) const;
 		void setEP(const DspValue& _src) const;
@@ -73,7 +71,10 @@ namespace dsp56k
 
 		void mask56(const JitRegGP& _alu) const;
 		void mask48(const JitRegGP& _alu) const;
-		
+
+		JitRegGP maskSC1624(const JitRegGP& _reg, bool _mask24 = true) const;
+		JitRegGP maskSC16(const JitRegGP& _reg) const { return maskSC1624(_reg, false); }
+
 		void setPC(const DspValue& _pc) const;
 		CCRMask& ccrDirtyFlags() { return m_ccrDirtyFlags; }
 

@@ -14,15 +14,15 @@ namespace dsp56k
 
 	void JitOptimizer::optimize(const JitEmitter& _emitter)
 	{
-		optimize(_emitter.firstNode());
+//		optimize(_emitter.firstNode());
 	}
 
 	void JitOptimizer::optimize(asmjit::BaseNode* _node)
 	{
 		m_ops.clear();
-
 		LOG("BEGIN");
 
+		/*
 		size_t idx=0;
 
 		while(_node)
@@ -61,17 +61,17 @@ namespace dsp56k
 				const auto prefix = reg.isVec() ? "vec" : "gp";
 
 				if(rw)
-					LOG(idx << " rw " << prefix << reg._baseId)
+					LOG(idx << " rw " << prefix << reg._baseId);
 				else if(written)
-					LOG(idx << " write " << prefix << reg._baseId)
+					LOG(idx << " write " << prefix << reg._baseId);
 				else if(read)
-					LOG(idx << " read " << prefix << reg._baseId)
+					LOG(idx << " read " << prefix << reg._baseId);
 			}
 
 			_node = _node->next();
 			++idx;
 		}
-
+		*/
 		LOG("END");
 	}
 }

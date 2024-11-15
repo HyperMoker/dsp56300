@@ -9,22 +9,23 @@
 
 namespace dsp56k
 {
-	void EsaiClock::exec()
+	EsxiClock::EsxiClock(IPeripherals& _peripherals)
+		: m_periph(_peripherals)
 	{
-		const auto clock = m_periph.getDSP().getInstructionCounter();
-		const auto diff = delta(clock, m_lastClock);
-		m_lastClock = clock;
+	}
 
-		m_cyclesSinceWrite += diff;
+	uint32_t EsxiClock::exec()
+	{
+		const auto diff = *m_dspInstructionCounter - m_lastClock;
 
-		if(m_cyclesSinceWrite < m_cyclesPerSample)
-			return;
+		if(diff < m_cyclesPerSample)
+			return (static_cast<uint32_t>(m_cyclesPerSample - diff)) >> static_cast<uint32_t>(m_clockSource);	// see explanation at end of this func
 
-		m_cyclesSinceWrite -= m_cyclesPerSample;
+		m_lastClock += m_cyclesPerSample;
 
 		auto advanceClock = [](Clock& _c)
 		{
-			if (++_c.counter > _c.divider)
+			if (++_c.counter > static_cast<int32_t>(_c.divider))
 			{
 				_c.counter = 0;
 				return true;
@@ -32,31 +33,36 @@ namespace dsp56k
 			return false;
 		};
 
+		std::array<Esxi*, MaxEsais> processTx;
+		uint32_t txCount = 0;
+		std::array<Esxi*, MaxEsais> processRx;
+		uint32_t rxCount = 0;
+
 		for (auto& e : m_esais)
 		{
-			if(advanceClock(e.tx))
-				m_esaisProcessTX.push_back(e.esai);
+			if(e.esai->hasEnabledTransmitters() && advanceClock(e.tx))
+				processTx[txCount++] = e.esai;
 
-			if (advanceClock(e.rx))
-				m_esaisProcessRX.push_back(e.esai);
+			if (e.esai->hasEnabledReceivers() && advanceClock(e.rx))
+				processRx[rxCount++] = e.esai;
 		}
-#if 0
-		for(size_t i=0; i<std::max(m_esaisProcessRX.size(), m_esaisProcessTX.size()); ++i)
-		{
-			if(i < m_esaisProcessTX.size())
-				m_esaisProcessTX[i]->execTX();
-			if (i < m_esaisProcessRX.size())
-				m_esaisProcessRX[i]->execRX();
-		}
-#else
-		for (auto* e : m_esaisProcessTX)	e->execTX();
-		for (auto* e : m_esaisProcessRX)	e->execRX();
-#endif
-		m_esaisProcessTX.clear();
-		m_esaisProcessRX.clear();
+
+		for(size_t i=0; i<txCount; ++i) processTx[i]->execTX();
+		for(size_t i=0; i<rxCount; ++i) processRx[i]->execRX();
+
+		if(diff >= (m_cyclesPerSample<<1))
+			return 0;
+
+		const auto delay = static_cast<uint32_t>((m_cyclesPerSample << 1) - diff);
+
+		// if the clock source is not instructions but cycles, we will miss frames if we return the cycle delay here because
+		// peripherals are processed via instruction counts. Return only half of the cycles in this case
+		static_assert(static_cast<uint32_t>(ClockSource::Instructions) == 0);
+		static_assert(static_cast<uint32_t>(ClockSource::Cycles) == 1);
+		return delay >> static_cast<uint32_t>(m_clockSource);
 	}
 
-	void EsaiClock::setPCTL(const TWord _val)
+	void EsxiClock::setPCTL(const TWord _val)
 	{
 		if(m_pctl == _val)
 			return;
@@ -66,7 +72,7 @@ namespace dsp56k
 		updateCyclesPerSample();
 	}
 
-	void EsaiClock::setSamplerate(const uint32_t _samplerate)
+	void EsxiClock::setSamplerate(const uint32_t _samplerate)
 	{
 		if (m_samplerate == _samplerate)
 			return;
@@ -76,7 +82,7 @@ namespace dsp56k
 		updateCyclesPerSample();
 	}
 
-	void EsaiClock::setCyclesPerSample(const uint32_t _cyclesPerSample)
+	void EsxiClock::setCyclesPerSample(const uint32_t _cyclesPerSample)
 	{
 		if(m_fixedCyclesPerSample == _cyclesPerSample)
 			return;
@@ -86,7 +92,7 @@ namespace dsp56k
 		updateCyclesPerSample();
 	}
 
-	void EsaiClock::setExternalClockFrequency(const uint32_t _freq)
+	void EsxiClock::setExternalClockFrequency(const uint32_t _freq)
 	{
 		if(_freq == m_externalClockFrequency)
 			return;
@@ -95,13 +101,60 @@ namespace dsp56k
 		updateCyclesPerSample();
 	}
 
-	void EsaiClock::updateCyclesPerSample()
+	void EsxiClock::setDSP(const DSP* _dsp)
 	{
-		if(m_fixedCyclesPerSample)
+		setClockSource(_dsp, ClockSource::Instructions);
+	}
+
+	void EsxiClock::setClockSource(const ClockSource _clockSource)
+	{
+		setClockSource(&m_periph.getDSP(), _clockSource);
+	}
+
+	void EsxiClock::restartClock()
+	{
+		m_lastClock = *m_dspInstructionCounter;
+		m_periph.setDelayCycles(0);
+	}
+
+	TWord EsxiClock::getRemainingInstructionsForFrameSync() const
+	{
+		constexpr TWord offset = 1;
+
+		const auto cyclesSinceWrite = getDspInstructionCounter() - getLastClock();
+
+		if (cyclesSinceWrite >= getCyclesPerSample() - offset)
+			return 0;
+
+		const auto periphCycles = getPeripherals().getDSP().getRemainingPeripheralsCycles();
+
+		if(periphCycles < offset)
+			return 0;
+
+		const auto diff = getCyclesPerSample() - cyclesSinceWrite - offset;
+
+		return std::min(static_cast<uint32_t>(diff), periphCycles - offset);
+	}
+
+	void EsxiClock::setClockSource(const DSP* _dsp, const ClockSource _clockSource)
+	{
+		switch (_clockSource)
 		{
-			m_cyclesPerSample = m_fixedCyclesPerSample;
+		case ClockSource::Instructions:
+			m_dspInstructionCounter = &_dsp->getInstructionCounter();
+			break;
+		case ClockSource::Cycles:
+			m_dspInstructionCounter = &_dsp->getCycles();
+			break;
 		}
-		else
+		m_clockSource = _clockSource;
+	}
+
+	void EsxiClock::updateCyclesPerSample()
+	{
+		uint32_t cyclesPerSample = m_fixedCyclesPerSample;
+
+		if(!cyclesPerSample)
 		{
 			if(!m_pctl)
 				return;
@@ -110,24 +163,33 @@ namespace dsp56k
 			const auto df = 1 << ((m_pctl >> 12) & 3);
 			const auto mf = (m_pctl & 0xfff) + 1;
 
-			const auto speedHz = static_cast<uint64_t>(m_externalClockFrequency) * static_cast<uint64_t>(mf) / (static_cast<uint64_t>(pd) * static_cast<uint64_t>(df));
+			m_speedHz = static_cast<uint64_t>(m_externalClockFrequency) * static_cast<uint64_t>(mf) / (static_cast<uint64_t>(pd) * static_cast<uint64_t>(df));
 
 			if (m_samplerate)
-				m_cyclesPerSample = static_cast<uint32_t>((speedHz / m_samplerate) >> 1);	// 2 samples = 1 frame (stereo)
+				cyclesPerSample = static_cast<uint32_t>((m_speedHz / m_samplerate) >> 1);	// 2 samples = 1 frame (stereo)
 			else
-				m_cyclesPerSample = mf * 128 / pd;			// The ratio between external clock and sample period simplifies to this.
+				cyclesPerSample = mf * 128 / pd;			// The ratio between external clock and sample period simplifies to this.
+
+			cyclesPerSample *= m_speedPercent;
+			cyclesPerSample /= 100;
 
 			// A more full expression would be m_cyclesPerSample = dsp_frequency / samplerate, where
 			// dsp_frequency = m_extClock * mf / pd and samplerate = m_extClock/256
 
-			const auto speedMhz = static_cast<double>(speedHz) / 1000000.0f;
-			LOG("Clock speed changed to: " << speedMhz << " Mhz, EXTAL=" << m_externalClockFrequency << " Hz, PCTL=" << HEX(m_pctl) << ", mf=" << HEX(mf) << ", pd=" << HEX(pd) << ", df=" << HEX(df) << " => cycles per sample=" << std::dec << m_cyclesPerSample << ", predefined samplerate=" << m_samplerate);
+			const auto speedMhz = static_cast<double>(m_speedHz) / 1000000.0f * m_speedPercent / 100.0f;
+			LOG("Clock speed changed to: " << speedMhz << " Mhz, EXTAL=" << m_externalClockFrequency << " Hz, PCTL=" << HEX(m_pctl) << ", mf=" << HEX(mf) << ", pd=" << HEX(pd) << ", df=" << HEX(df) << " => cycles per sample=" << std::dec << cyclesPerSample << ", predefined samplerate=" << m_samplerate);
+		}
+		else
+		{
+			cyclesPerSample *= m_speedPercent;
+			cyclesPerSample /= 100;
 		}
 
-		m_cyclesSinceWrite = 0;
+		m_cyclesPerSample = cyclesPerSample;
+		m_lastClock = *m_dspInstructionCounter;
+		m_periph.setDelayCycles(0);
 	}
-
-	void EsaiClock::setEsaiDivider(Esai* _esai, const TWord _dividerTX, const TWord _dividerRX)
+	void EsxiClock::setEsaiDivider(Esxi* _esai, const TWord _dividerTX, const TWord _dividerRX)
 	{
 		bool found = false;
 
@@ -148,13 +210,13 @@ namespace dsp56k
 		if(!found)
 		{
 			m_esais.emplace_back(EsaiEntry{ _esai, {_dividerTX}, {_dividerRX} });
-			m_esaisProcessRX.reserve(m_esais.size());
-			m_esaisProcessTX.reserve(m_esais.size());
-			_esai->setClockSource(this);
 		}
+
+		if(m_periph.hasDSP())
+			m_periph.setDelayCycles(0);
 	}
 
-	bool EsaiClock::setEsaiCounter(const Esai* _esai, const TWord _counterTX, const TWord _counterRX)
+	bool EsxiClock::setEsaiCounter(const Esxi* _esai, const int _counterTX, const int _counterRX)
 	{
 		for (auto& esai : m_esais)
 		{
@@ -168,32 +230,83 @@ namespace dsp56k
 		return false;
 	}
 
-	TWord EsaiClock::getRemainingInstructionsForFrameSync(const TWord _expectedBitValue) const
+	bool EsxiClock::setSpeedPercent(const uint32_t _percent)
 	{
-		if (static_cast<bool>(bittest<TWord, Esai::M_TFS>(m_esais.front().esai->readStatusRegister())) == static_cast<bool>(_expectedBitValue))
+		if(m_speedPercent == _percent)
+			return true;
+
+		if(_percent == 0)
+			return false;
+
+		m_speedPercent = _percent;
+		updateCyclesPerSample();
+		return true;
+	}
+	
+	// ______________________
+	//
+
+	EsaiClock::EsaiClock(Peripherals56362& _peripherals) : EsxiClock(_peripherals)
+	{
+	}
+
+	template<bool ExpectedResult>
+	TWord EsaiClock::getRemainingInstructionsForTransmitFrameSync() const
+	{
+		if (static_cast<bool>(static_cast<Esai*>(getEsais().front().esai)->getTransmitFrameSync()) == ExpectedResult)
 		{
 			// already reached the desired value
 			return 0;
 		}
 
-		constexpr TWord offset = 1;
-
-		if (m_cyclesSinceWrite >= m_cyclesPerSample - offset)
-			return 0;
-
-		const auto periphCycles = m_periph.getDSP().getRemainingPeripheralsCycles();
-
-		if(periphCycles < offset)
-			return 0;
-
-		const auto diff = m_cyclesPerSample - m_cyclesSinceWrite - offset;
-
-		return std::min(diff, periphCycles - offset);
+		return getRemainingInstructionsForFrameSync();
 	}
 
-	void EsaiClock::onTCCRChanged(Esai*)
+	template<bool ExpectedResult>
+	TWord EsaiClock::getRemainingInstructionsForReceiveFrameSync() const
 	{
-//		for (auto& esai : m_esais)
-//			esai.clockCounter = 0;
+		if (static_cast<bool>(static_cast<Esai*>(getEsais().front().esai)->getReceiveFrameSync()) == ExpectedResult)
+		{
+			// already reached the desired value
+			return 0;
+		}
+
+		return getRemainingInstructionsForFrameSync();
 	}
+
+	EssiClock::EssiClock(Peripherals56303& _peripherals) : EsxiClock(_peripherals)
+	{
+	}
+
+	template<bool ExpectedResult>
+	TWord EssiClock::getRemainingInstructionsForTransmitFrameSync(uint32_t _esaiIndex) const
+	{
+		if (static_cast<Essi*>(getEsais()[_esaiIndex].esai)->getTransmitFrameSync() == ExpectedResult)
+		{
+			// already reached the desired value
+			return 0;
+		}
+		return getRemainingInstructionsForFrameSync();
+	}
+
+	template<bool ExpectedResult>
+	TWord EssiClock::getRemainingInstructionsForReceiveFrameSync(uint32_t _esaiIndex) const
+	{
+		if (static_cast<Essi*>(getEsais()[_esaiIndex].esai)->getReceiveFrameSync() == ExpectedResult)
+		{
+			// already reached the desired value
+			return 0;
+		}
+		return getRemainingInstructionsForFrameSync();
+	}
+
+	template TWord EssiClock::getRemainingInstructionsForTransmitFrameSync<true>(uint32_t) const;
+	template TWord EssiClock::getRemainingInstructionsForTransmitFrameSync<false>(uint32_t) const;
+	template TWord EssiClock::getRemainingInstructionsForReceiveFrameSync<true>(uint32_t) const;
+	template TWord EssiClock::getRemainingInstructionsForReceiveFrameSync<false>(uint32_t) const;
+
+	template TWord EsaiClock::getRemainingInstructionsForTransmitFrameSync<true>() const;
+	template TWord EsaiClock::getRemainingInstructionsForTransmitFrameSync<false>() const;
+	template TWord EsaiClock::getRemainingInstructionsForReceiveFrameSync<true>() const;
+	template TWord EsaiClock::getRemainingInstructionsForReceiveFrameSync<false>() const;
 }

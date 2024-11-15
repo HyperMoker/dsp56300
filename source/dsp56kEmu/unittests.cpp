@@ -45,6 +45,7 @@ namespace dsp56k
 		bset_aa();
 		btst_aa();
 
+		clb();
 		clr();
 		cmp();
 		cmpm();
@@ -71,6 +72,7 @@ namespace dsp56k
 		mpyr();
 		mpy_SD();
 		neg();
+		normf();
 		not_();
 		or_();
 		ori();
@@ -162,13 +164,13 @@ namespace dsp56k
 		runTest([&]()
 		{
 			dsp.set_m(0, 0x000fff);
-			dsp.regs().r[0].var = 0x000f00;
+			dsp.regs().r[0].var = 0x123f00;
 			dsp.regs().n[0].var = 0x000200;
 
 			emit(0x204800);	// move (r0)+n0
 		}, [&]()
 		{
-			verify(dsp.regs().r[0] == 0x000100);
+			verify(dsp.regs().r[0] == 0x123100);
 		});
 
 		runTest([&]()
@@ -359,21 +361,73 @@ namespace dsp56k
 
 	void UnitTests::x0x1Combinations()
 	{
-		dsp.x0(0xaabbcc);
-		dsp.x1(0xddeeff);
-
-		dsp.y0(0xabcdef);
-		dsp.y1(0x123456);
-
 		runTest([&]()
 		{
 			dsp.x0(0xaabbcc);
 			dsp.x1(0xddeeff);
 
+			dsp.y0(0xabcdef);
+			dsp.y1(0x123456);
+
 			emit(0x44f400, 0xbabecc);	// move #$babecc,x0
 		}, [&]()
 		{
 			verify(dsp.regs().x.var == 0xddeeffbabecc);
+			verify(dsp.regs().y.var == 0x123456abcdef);
+		});
+
+		auto init = [&]()
+		{
+			dsp.x0(0x111111);
+			dsp.x1(0x222222);
+
+			dsp.y0(0x333333);
+			dsp.y1(0x444444);
+		};
+
+		// write to partial registers and check if common register is intact
+		runTest([&]()
+		{
+			init();
+			emit(0x44f400, 0xaaaaaa);	// move #$aaaaaa,x0
+//			emit(0x45f400, 0xbbbbbb);	// move #$bbbbbb,x1
+//			emit(0x46f400, 0xcccccc);	// move #$cccccc,y0
+			emit(0x47f400, 0xdddddd);	// move #$dddddd,y1
+//			emit(0x20c700);				// move y0, y1
+		}, [&]()
+		{
+			verify(dsp.regs().x.var == 0x222222aaaaaa);
+			verify(dsp.regs().y.var == 0xdddddd333333);
+		});
+
+		// write to two partial registers of the same common reg
+		runTest([&]()
+		{
+			init();
+
+			emit(0x44f400, 0xaaaaaa);	// move #$aaaaaa,x0
+			emit(0x45f400, 0xbbbbbb);	// move #$bbbbbb,x1
+		}, [&]()
+		{
+			verify(dsp.regs().x.var == 0xbbbbbbaaaaaa);
+			verify(dsp.regs().y.var == 0x444444333333);
+		});
+
+		// write one half, then use the common reg for an add
+		runTest([&]()
+		{
+			init();
+			dsp.regs().a.var = 0;
+			dsp.regs().b.var = 0;
+
+			emit(0x44f400, 0xaaaaaa);	// move #$aaaaaa,x0
+			emit(0x47f400, 0xdddddd);	// move #$dddddd,y1
+			emit(0x200020);				// add x,a
+			emit(0x200038);				// add y,b
+		}, [&]()
+		{
+			verify(dsp.regs().a.var == 0x00222222aaaaaa);
+			verify(dsp.regs().b.var == 0xffdddddd333333);
 		});
 	}
 
@@ -872,6 +926,17 @@ namespace dsp56k
 			verify(!dsp.sr_test(CCR_C));
 			verify(dsp.regs().omr.var == 0xddee7f);
 		});
+
+		// test undocumented feature of bclr #xx,[a,b], it works even though the documentation states otherwise
+		runTest([&]()
+		{
+			dsp.regs().b.var = 0xff'ffffff'ffffff;
+			emit(0x0acf56);	// bclr #$16,b
+		}, [&]()
+		{
+			verify(dsp.sr_test(CCR_C));
+			verify(dsp.regs().b.var == 0xffbfffff000000);
+		});
 	}
 
 	void UnitTests::bset_aa()
@@ -911,6 +976,30 @@ namespace dsp56k
 		{
 			verify(!dsp.sr_test(CCR_C));
 		});
+	}
+
+	void UnitTests::clb()
+	{
+		auto testClb = [&](const uint64_t _a, const uint64_t _b)
+		{
+			runTest([&]()
+			{
+				dsp.regs().a.var = _a;
+				dsp.regs().b.var = 0;
+
+				emit(0xc1e01);		// clb a,b
+			},
+				[&]()
+			{
+				LOG("Expected " << HEX(_b) << ", got "<< HEX(dsp.regs().b.var));
+				verify(dsp.regs().b == _b);
+			});
+		};
+
+		testClb(0x00'ff'ffffff'ffffff, 0xffffffd1000000);
+		testClb(0x00'00'ffffff'000000, 0x00000001000000);
+		testClb(0x00'00'000000'000001, 0xffffffd2000000);
+		testClb(0, 0);	// special case
 	}
 
 	void UnitTests::clr()
@@ -1052,7 +1141,7 @@ namespace dsp56k
 		{
 			dsp.setSR(dsp.getSR().var & 0xfe);
 
-			constexpr uint64_t expectedValues[24] =
+			static constexpr uint64_t expectedValues[24] =
 			{
 				0xffef590e000000,
 				0xffef790e000000,
@@ -1101,7 +1190,7 @@ namespace dsp56k
 			dsp.reg.a.var = 0x00008000000000;
 			dsp.setSR(0x0800d4);
 
-			constexpr uint64_t expectedValues[24] =
+			static constexpr uint64_t expectedValues[24] =
 			{
 				0xffdf7214000000,
 				0xffe07214000000,
@@ -1276,6 +1365,31 @@ namespace dsp56k
 			verify(dsp.reg.a.var == 0xf4);
 			verify(dsp.getSR().var == 0x0800d0);
 		});
+
+		runTest([&]()
+		{
+			dsp.reg.a.var = 0;
+			dsp.reg.b.var = 0xef123456abcdef;
+
+			// extractu #$020000,b,a
+			emit(0x0c1890, 0x020000);
+		}, [&]()
+		{
+			verify(dsp.reg.a.var == 0x56abcdef);
+		});
+
+		runTest([&]()
+		{
+			dsp.reg.b.var = 0;
+			dsp.b1(TReg24(0xAABBCC));
+			dsp.b0(TReg24(0xDDEEFF));
+
+			// extractu #$020000,b,a
+			emit(0x0c1890, 0x020000);
+		}, [&]()
+		{
+			verify(dsp.reg.a.var == 0x0000CCDDEEFF);
+		});
 	}
 
 	void UnitTests::extractu_co()
@@ -1340,6 +1454,20 @@ namespace dsp56k
 			[&]()
 		{
 			verify(dsp.regs().a.var == 0xcdef3456123456);
+		});
+
+		runTest([&]()
+		{
+			dsp.reg.a.var = 0;
+			dsp.reg.b.var = 0;
+			dsp.a0(TReg24(0xDDEEFF));
+			dsp.b0(TReg24(0xAABBCC));
+			dsp.x1(0x8000);
+			emit(0xc1b3c);							// insert x1,b0,a
+		},
+			[&]()
+		{
+			verify(dsp.a0().var == 0xDDEECC);
 		});
 	}
 
@@ -1746,6 +1874,23 @@ namespace dsp56k
 			verify(dsp.reg.a.var == 0x00000036000000);
 			verify(dsp.getSR().var == 0x0800d1);
 		});
+
+		// mpy xn,#imm,alu
+
+		runTest([&]()
+		{
+			dsp.x0(0x020);
+			dsp.x1(0x400);
+			dsp.reg.a.var = 0x12abcdefabdef;
+			dsp.reg.b.var = 0x12abcdefabdef;
+
+			emit(0x0113f0);	// mpy x1,#19,a
+			emit(0x010ad8);	// mpy x0,#10,b
+		}, [&]()
+		{
+			verify(dsp.reg.a.var == 0x8000);
+			verify(dsp.reg.b.var == 0x80000);
+		});
 	}
 
 	void UnitTests::mpyr()
@@ -1805,6 +1950,26 @@ namespace dsp56k
 			verify(dsp.regs().a.var == 2);
 			verify(!dsp.sr_test(CCR_N));
 			verify(!dsp.sr_test(CCR_Z));
+		});
+	}
+
+	void UnitTests::normf()
+	{
+		runTest([&]()
+		{
+			dsp.regs().a.var = 0x00123456789abc;
+			dsp.regs().b.var = 0x00123456789abc;
+
+			dsp.x0(4);
+			dsp.y0(-4);
+
+			emit(0x0c1e28);				// normf x0,a
+			emit(0x0c1e2b);				// normf y0,b
+		},
+			[&]()
+		{
+			verify(dsp.regs().a.var == 0x000123456789ab);
+			verify(dsp.regs().b.var == 0x0123456789abc0);
 		});
 	}
 
@@ -1951,6 +2116,55 @@ namespace dsp56k
 			verify(!dsp.sr_test(CCR_Z));
 			verify(!dsp.sr_test(CCR_V));
 		});
+
+		runTest([&]()
+		{
+			dsp.regs().a.var = 0xffffffffffffff;
+
+			emit(0x200011);				// rnd a
+		},
+			[&]()
+		{
+			verify(dsp.regs().a.var == 0);
+		});
+
+		// test rnd with scaling mode bits set
+
+		runTest([&]()
+		{
+			dsp.regs().a.var = 0x00222222ffffff;
+			dsp.sr_set(SR_S0);
+			dsp.sr_clear(SR_S1);
+			emit(0x200011);				// rnd a
+		},
+			[&]()
+		{
+			verify(dsp.regs().a.var == 0x00222222000000);
+		});
+
+		runTest([&]()
+		{
+			dsp.regs().a.var = 0x00eeeeeebbbbbb;
+			dsp.sr_clear(SR_S0);
+			dsp.sr_set(SR_S1);
+			emit(0x200011);				// rnd a
+		},
+			[&]()
+		{
+			verify(dsp.regs().a.var == 0x00eeeeee800000);
+		});
+
+		runTest([&]()
+		{
+			dsp.regs().a.var = 0x00eeeeeebbbbbb;
+			dsp.sr_clear(SR_S0);
+			dsp.sr_clear(SR_S1);
+			emit(0x200011);				// rnd a
+		},
+			[&]()
+		{
+			verify(dsp.regs().a.var == 0x00eeeeef000000);
+		});
 	}
 
 	void UnitTests::rol()
@@ -2064,6 +2278,19 @@ namespace dsp56k
 			[&]()
 		{
 			verify(dsp.regs().a.var == 6);
+			verify(!dsp.sr_test(CCR_Z));
+		});
+
+		runTest([&]()
+		{
+			dsp.regs().a.var = 2;
+			dsp.regs().b.var = 4;
+
+			emit(0x20001e);		// subl a,b
+		},
+			[&]()
+		{
+			verify(dsp.regs().b.var == 6);
 			verify(!dsp.sr_test(CCR_Z));
 		});
 

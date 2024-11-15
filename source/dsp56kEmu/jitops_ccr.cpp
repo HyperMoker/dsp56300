@@ -8,10 +8,8 @@ namespace dsp56k
 
 	void JitOps::ccr_set(CCRMask _mask)
 	{
-		m_ccrWritten |= _mask;
-
-		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(_mask));
 		ccr_clearDirty(_mask);
+		m_asm.or_(r32(m_dspRegs.getSR(JitDspRegs::ReadWrite)), asmjit::Imm(_mask));
 	}
 
 	void JitOps::ccr_dirty(TWord _aluIndex, const JitReg64& _alu, const CCRMask _dirtyBits)
@@ -40,6 +38,7 @@ namespace dsp56k
 
 	void JitOps::ccr_clearDirty(const CCRMask _mask)
 	{
+		m_ccrWritten |= _mask;
 		m_ccrDirty = static_cast<CCRMask>(m_ccrDirty & ~_mask);
 	}
 
@@ -108,7 +107,7 @@ namespace dsp56k
 
 	void JitOps::checkCondition(const TWord _cc, const std::function<void()>& _true, const std::function<void()>& _false, bool _hasFalseFunc, bool _updateDirtyCCR, bool _releaseRegPool)
 	{
-		DspValue sr(m_block, JitDspRegPool::DspSR, true, false);
+		DspValue sr(m_block, PoolReg::DspSR, true, false);
 
 		If(m_block, m_blockRuntimeData, [&](const asmjit::Label& _toFalse)
 		{
@@ -130,6 +129,7 @@ namespace dsp56k
 	}
 
 	JitOps::CcrBatchUpdate::CcrBatchUpdate(JitOps& _ops, CCRMask _maskA, CCRMask _maskB) : CcrBatchUpdate(_ops,  static_cast<CCRMask>(_maskA | _maskB)) {}
+	JitOps::CcrBatchUpdate::CcrBatchUpdate(JitOps& _ops, CCRMask _maskA, CCRMask _maskB, CCRMask _maskC) : CcrBatchUpdate(_ops,  static_cast<CCRMask>(_maskA | _maskB | _maskC)) {}
 
 	JitOps::CcrBatchUpdate::~CcrBatchUpdate()
 	{

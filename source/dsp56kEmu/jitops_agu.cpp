@@ -1,6 +1,7 @@
 #include "jitops.h"
 
 #include "jitconfig.h"
+#include "jitdspmode.h"
 
 namespace dsp56k
 {
@@ -17,14 +18,14 @@ namespace dsp56k
 			break;
 		case AddressingMode::Modulo:
 			{
-				const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
-				const DspValue m = makeDspValueAguReg(m_block, JitDspRegPool::DspM0, _rrr, true, false);
+				const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
+				const DspValue m = makeDspValueAguReg(m_block, PoolReg::DspM0, _rrr, true, false);
 				updateAddressRegisterSubModulo(r32(_r), _n, r32(m), r32(moduloMask), _addN);
 			}
 			break;
 		case AddressingMode::MultiWrapModulo:
 			{
-				const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
+				const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
 				updateAddressRegisterSubMultipleWrapModulo(_r, _n, r32(moduloMask), _addN);
 			}
 			break;
@@ -35,7 +36,7 @@ namespace dsp56k
 			break;
 		}
 
-		m_asm.and_(_r, asmjit::Imm(0xffffff));
+		m_dspRegs.maskSC1624(_r);
 	}
 
 	void JitOps::updateAddressRegisterSubN1(const AddressingMode _mode, const JitReg32& _r, uint32_t _rrr, bool _addN)
@@ -50,14 +51,14 @@ namespace dsp56k
 			break;
 		case AddressingMode::Modulo:
 			{
-				const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
-				const DspValue m = makeDspValueAguReg(m_block, JitDspRegPool::DspM0, _rrr, true, false);
+				const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
+				const DspValue m = makeDspValueAguReg(m_block, PoolReg::DspM0, _rrr, true, false);
 				updateAddressRegisterSubModuloN1(_r, r32(m), r32(moduloMask), _addN);
 			}
 			break;
 		case AddressingMode::MultiWrapModulo:
 			{
-				const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
+				const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
 				updateAddressRegisterSubMultipleWrapModuloN1(_r, _addN, r32(moduloMask));
 			}
 			break;
@@ -68,7 +69,7 @@ namespace dsp56k
 			break;
 		}
 
-		m_asm.and_(_r, asmjit::Imm(0xffffff));
+		m_dspRegs.maskSC1624(_r);
 	}
 
 	DspValue JitOps::updateAddressRegister(const TWord _mmm, const TWord _rrr, bool _writeR/* = true*/, bool _returnPostR/* = false*/)
@@ -80,7 +81,7 @@ namespace dsp56k
 
 		if (_mmm == 4)													/* 100 (Rn)    */
 		{
-			return DspValue(m_block, JitDspRegPool::DspR0, true, false, _rrr);
+			return DspValue(m_block, PoolReg::DspR0, true, false, _rrr);
 		}
 
 		if (_mmm == 7)													/* 111 -(Rn)   */
@@ -91,7 +92,7 @@ namespace dsp56k
 					DspValue r = makeDspValueRegR(m_block, _rrr, true, true);
 					updateAddressRegisterSubN1(r32(r.get()), _rrr, false);
 				}
-				return DspValue(m_block, JitDspRegPool::DspR0, true, false, _rrr);
+				return DspValue(m_block, PoolReg::DspR0, true, false, _rrr);
 			}
 
 			DspValue r = m_dspRegs.getR(_rrr);
@@ -121,7 +122,7 @@ namespace dsp56k
 		if (!_returnPostR)
 		{
 			if (!_writeR)
-				return DspValue(m_block, JitDspRegPool::DspR0, true, false, _rrr);
+				return DspValue(m_block, PoolReg::DspR0, true, false, _rrr);
 
 			dst.temp(DspValue::Temp24);
 			m_asm.mov(dst.get(), r32(rRef.get()));
@@ -167,7 +168,7 @@ namespace dsp56k
 			rRef.release();
 
 			if (_returnPostR)
-				return DspValue(m_block, JitDspRegPool::DspR0, true, true, _rrr);
+				return DspValue(m_block, PoolReg::DspR0, true, true, _rrr);
 		}
 
 		return dst;
@@ -198,15 +199,35 @@ namespace dsp56k
 		const RegScratch scratch(m_block);
 		const auto temp = r32(scratch);
 
-		m_asm.mov(temp, _r);		// int32_t temp = r & moduloMask;
-		m_asm.and_(temp, _mask);
-		m_asm.xor_(_r, temp);		// r ^= temp;
+#ifdef HAVE_ARM64
 		if(_addN)
-			m_asm.inc(temp);		// temp += n;
+			m_asm.add(temp, _r, asmjit::Imm(1));
 		else
-			m_asm.dec(temp);		// temp -= n;
-		m_asm.and_(temp, _mask);	// temp &= moduloMask;
-		m_asm.or_(_r, temp);		// r |= temp;
+			m_asm.sub(temp, _r, asmjit::Imm(1));
+		m_asm.bic(_r, _r, _mask);
+		m_asm.and_(temp, temp, _mask);
+		m_asm.orr(_r, _r, temp);
+#else
+		if(JitEmitter::hasBMI())
+		{
+			m_asm.lea(temp, ptr(_r, _addN ? 1 : -1));
+			m_asm.andn(_r, _mask, _r);
+			m_asm.and_(temp, _mask);
+			m_asm.or_(_r, temp);
+		}
+		else
+		{
+			m_asm.mov(temp, _r);		// int32_t temp = r & moduloMask;
+			m_asm.and_(temp, _mask);
+			m_asm.xor_(_r, temp);		// r ^= temp;
+			if(_addN)
+				m_asm.inc(temp);		// temp += n;
+			else
+				m_asm.dec(temp);		// temp -= n;
+			m_asm.and_(temp, _mask);	// temp &= moduloMask;
+			m_asm.or_(_r, temp);		// r |= temp;
+		}
+#endif
 	}
 
 	void JitOps::updateAddressRegisterSubBitreverse(const JitReg32& _r, const JitReg32& _n, bool _addN)

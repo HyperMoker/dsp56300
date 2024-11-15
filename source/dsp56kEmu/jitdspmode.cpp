@@ -18,10 +18,11 @@ namespace dsp56k
 		}
 
 		// only the upper 16 bits of the SR are used, the 8 LSBs (CCR) are ignored
-		auto sr = _dsp.regs().sr.var & 0xffff00;
+		auto sr = _dsp.regs().sr.toWord() & 0xffff00;
 
 		// furthermore, ignore SR bits that the code doesn't depend on or evaluates at runtime
-		sr &= ~(SR_CP1 | SR_CP0 | SR_CE | __SR_18 | SR_SA | SR_FV | SR_LF | SR_SC | __SR_12 | SR_I1 | SR_I0 | SR_DM);
+		sr &= SrModeChangeRelevantBits;
+
 		m_mode |= sr << 8;
 	}
 
@@ -45,10 +46,10 @@ namespace dsp56k
 	{
 		const auto m = _m.toWord();
 
-		if(m == 0xffffff)
-			return AddressingMode::Linear;
-
 		const auto m16 = m & 0xffff;
+
+		if(m16 == 0xffff)
+			return AddressingMode::Linear;
 
 		if(m16 >= 0x8000)
 			return AddressingMode::MultiWrapModulo;

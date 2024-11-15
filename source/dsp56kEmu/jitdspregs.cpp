@@ -21,22 +21,22 @@ namespace dsp56k
 
 	DspValue JitDspRegs::getR(const TWord _agu) const
 	{
-		return DspValue(m_block, JitDspRegPool::DspR0, true, false, _agu);
+		return DspValue(m_block, PoolReg::DspR0, true, false, _agu);
 	}
 
 	void JitDspRegs::getR(DspValue& _dst, const TWord _agu) const
 	{
-		_dst = DspValue(m_block, static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspR0 + _agu), true, false);
+		_dst = DspValue(m_block, static_cast<PoolReg>(PoolReg::DspR0 + _agu), true, false);
 	}
 
 	void JitDspRegs::getN(DspValue& _dst, const TWord _agu) const
 	{
-		_dst = DspValue(m_block, static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspN0 + _agu), true, false);
+		_dst = DspValue(m_block, static_cast<PoolReg>(PoolReg::DspN0 + _agu), true, false);
 	}
 
 	void JitDspRegs::getM(DspValue& _dst, const TWord _agu) const
 	{
-		_dst = DspValue(m_block, static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspM0 + _agu), true, false);
+		_dst = DspValue(m_block, static_cast<PoolReg>(PoolReg::DspM0 + _agu), true, false);
 	}
 
 	void JitDspRegs::load24(DspValue& _dst, const TReg24& _src) const
@@ -71,36 +71,47 @@ namespace dsp56k
 
 	void JitDspRegs::setR(TWord _agu, const DspValue& _src) const
 	{
-		pool().write(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspR0 + _agu), _src);
+		const auto poolReg = static_cast<PoolReg>(PoolReg::DspR0 + _agu);
+		pool().write(poolReg, _src);
+
+		const DSPReg r(m_block, poolReg, true, true);
+		maskSC16(r);
 	}
 
 	void JitDspRegs::setN(TWord _agu, const DspValue& _src) const
 	{
-		pool().write(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspN0 + _agu), _src);
+		const auto poolReg = static_cast<PoolReg>(PoolReg::DspN0 + _agu);
+		pool().write(poolReg, _src);
+
+		const DSPReg r(m_block, poolReg, true, true);
+		maskSC16(r);
 	}
 
 	void JitDspRegs::setM(TWord _agu, const DspValue& _src) const
 	{
-		pool().write(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspM0 + _agu), _src);
-
-		const DspValue mMod = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mod, _agu, false, true);
-		const DspValue mMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _agu, false, true);
+		const DspValue mMod = makeDspValueAguReg(m_block, PoolReg::DspM0mod, _agu, false, true);
+		const DspValue mMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _agu, false, true);
 
 		const auto mod = r32(mMod);
 		const auto mask = r32(mMask);
 
 		if(_src.isImmediate())
 		{
-			const auto val = _src.imm24();
+			auto val = _src.imm24();
 
-			if (val == 0xffffff)
+			if(m_block.getMode() && m_block.getMode()->testSR(SRB_SC))
+				val &= 0xffff;
+
+			pool().write(static_cast<PoolReg>(PoolReg::DspM0 + _agu), DspValue(m_block, val));
+
+			const TWord moduloTest = val & 0xffff;
+
+			if (moduloTest == 0xffff)
 			{
 				m_asm.mov(mod, asmjit::Imm(0));
 				m_asm.mov(mask, asmjit::Imm(0xffffff));
 				return;
 			}
-
-			const TWord moduloTest = (val & 0xffff);
 
 			if (moduloTest == 0)
 			{
@@ -122,6 +133,28 @@ namespace dsp56k
 			return;
 		}
 
+		// if the source is an M reg too we can copy the previously calculated values from the source
+		const auto dspReg = _src.getDspReg().dspReg();
+
+		if(dspReg >= DspM0 && dspReg <= DspM7)
+		{
+			const auto m = dspReg - DspM0;
+
+			pool().write(static_cast<PoolReg>(PoolReg::DspM0 + _agu), _src);
+
+			m_asm.mov(mod , r32(m_block.dspRegPool().get(static_cast<PoolReg>(DspM0mod  + m), true, false)));
+			m_asm.mov(mask, r32(m_block.dspRegPool().get(static_cast<PoolReg>(DspM0mask + m), true, false)));
+
+			return;
+		}
+
+		pool().write(static_cast<PoolReg>(PoolReg::DspM0 + _agu), _src);
+
+		{
+			DSPReg r(m_block, static_cast<PoolReg>(PoolReg::DspM0 + _agu), true ,true);
+			maskSC16(r);
+		}
+
 		const asmjit::Label end = m_asm.newLabel();
 		const asmjit::Label isLinear = m_asm.newLabel();
 		const asmjit::Label isBitreverse = m_asm.newLabel();
@@ -130,17 +163,18 @@ namespace dsp56k
 #ifdef HAVE_ARM64
 		{
 			const RegScratch scratch(m_block);
-			m_asm.mov(scratch, Imm(0xffffff));
-			m_asm.cmp(_src.get(), r32(scratch));
+			m_asm.add(r32(scratch), r32(_src), asmjit::Imm(1));
+			m_asm.tst(r32(scratch), asmjit::Imm(0xffff));
+			m_asm.jz(isLinear);
 		}
 #else
-		m_asm.cmp(_src.get(), Imm(0xffffff));
-#endif
+		m_asm.cmp(_src.get().r16(), Imm(0xffff));
 		m_asm.jz(isLinear);
+#endif
 
 		m_asm.mov(mod, _src.get());
-
 		m_asm.and_(mod, asmjit::Imm(0xffff));
+
 		m_asm.test_(mod);
 		m_asm.jz(isBitreverse);
 
@@ -195,22 +229,22 @@ namespace dsp56k
 
 	JitRegGP JitDspRegs::getSR(AccessType _type) const
 	{
-		return pool().get(JitDspRegPool::DspSR, _type & Read, _type & Write);
+		return pool().get(PoolReg::DspSR, _type & Read, _type & Write);
 	}
 
 	void JitDspRegs::getALU(const JitRegGP& _dst, const TWord _alu) const
 	{
-		pool().read(_dst, static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspA + _alu));
+		pool().read(_dst, static_cast<PoolReg>(PoolReg::DspA + _alu));
 	}
 
 	DspValue JitDspRegs::getALU(TWord _alu) const
 	{
-		return pool().read(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspA + _alu));
+		return pool().read(static_cast<PoolReg>(PoolReg::DspA + _alu));
 	}
 
 	void JitDspRegs::setALU(const TWord _alu, const DspValue& _src, const bool _needsMasking) const
 	{
-		const auto r = static_cast<JitDspRegPool::DspReg>((pool().isParallelOp() ? JitDspRegPool::DspAwrite : JitDspRegPool::DspA) + _alu);
+		const auto r = static_cast<PoolReg>((pool().isParallelOp() ? PoolReg::DspAwrite : PoolReg::DspA) + _alu);
 
 		pool().write(r, _src);
 
@@ -223,7 +257,7 @@ namespace dsp56k
 
 	void JitDspRegs::clrALU(const TWord _alu) const
 	{
-		const auto r = static_cast<JitDspRegPool::DspReg>((pool().isParallelOp() ? JitDspRegPool::DspAwrite : JitDspRegPool::DspA) + _alu);
+		const auto r = static_cast<PoolReg>((pool().isParallelOp() ? PoolReg::DspAwrite : PoolReg::DspA) + _alu);
 		const auto alu = pool().get(r, false, true);
 		m_asm.clr(alu);
 
@@ -233,18 +267,7 @@ namespace dsp56k
 
 	void JitDspRegs::getXY(const JitRegGP& _dst, TWord _xy) const
 	{
-		pool().read(_dst, static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _xy));
-	}
-
-	JitRegGP JitDspRegs::getXY(TWord _xy, AccessType _access) const
-	{
-		return pool().get(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _xy), _access & Read, _access & Write);
-	}
-
-	void JitDspRegs::setXY(const uint32_t _xy, const JitRegGP& _src) const
-	{
-		mask48(_src);
-		pool().write(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _xy), _src);
+		pool().getXY(r64(_dst), _xy);
 	}
 
 	void JitDspRegs::getEP(DspValue& _dst) const
@@ -289,12 +312,12 @@ namespace dsp56k
 
 	void JitDspRegs::getSR(DspValue& _dst) const
 	{
-		_dst = DspValue(m_block, JitDspRegPool::DspSR, true, false);
+		_dst = DspValue(m_block, PoolReg::DspSR, true, false);
 	}
 
 	void JitDspRegs::setSR(const DspValue& _src) const
 	{
-		pool().write(JitDspRegPool::DspSR, _src);
+		pool().write(PoolReg::DspSR, _src);
 	}
 
 	void JitDspRegs::getOMR(DspValue& _dst) const
@@ -324,46 +347,46 @@ namespace dsp56k
 
 	JitRegGP JitDspRegs::getLA(AccessType _type) const
 	{
-		return pool().get(JitDspRegPool::DspLA, _type & Read, _type & Write);
+		return pool().get(PoolReg::DspLA, _type & Read, _type & Write);
 	}
 
 	void JitDspRegs::getLA(DspValue& _dst) const
 	{
 		if(!_dst.isRegValid())
 		{
-			_dst = DspValue(m_block, JitDspRegPool::DspLA, true, false);
+			_dst = DspValue(m_block, PoolReg::DspLA, true, false);
 		}
 		else
 		{
-			pool().read(_dst.get(), JitDspRegPool::DspLA);
+			pool().read(_dst.get(), PoolReg::DspLA);
 		}
 	}
 
 	void JitDspRegs::setLA(const DspValue& _src) const
 	{
-		return pool().write(JitDspRegPool::DspLA, _src);
+		return pool().write(PoolReg::DspLA, _src);
 	}
 
 	JitRegGP JitDspRegs::getLC(AccessType _type) const
 	{
-		return pool().get(JitDspRegPool::DspLC, _type & Read, _type & Write);
+		return pool().get(PoolReg::DspLC, _type & Read, _type & Write);
 	}
 
 	void JitDspRegs::getLC(DspValue& _dst) const
 	{
 		if(!_dst.isRegValid())
 		{
-			_dst = DspValue(m_block, JitDspRegPool::DspLC, true, false);
+			_dst = DspValue(m_block, PoolReg::DspLC, true, false);
 		}
 		else
 		{
-			pool().read(_dst.get(), JitDspRegPool::DspLC);
+			pool().read(_dst.get(), PoolReg::DspLC);
 		}
 	}
 
 	void JitDspRegs::setLC(const DspValue& _src) const
 	{
-		return pool().write(JitDspRegPool::DspLC, _src);
+		return pool().write(PoolReg::DspLC, _src);
 	}
 
 	void JitDspRegs::getSS(const JitReg64& _dst) const
@@ -453,6 +476,32 @@ namespace dsp56k
 		m_asm.shl(r64(_alu), Imm(16));	
 		m_asm.shr(r64(_alu), Imm(16));
 #endif
+	}
+
+	JitRegGP JitDspRegs::maskSC1624(const JitRegGP& _reg, const bool _mask24) const
+	{
+		const auto r = r32(_reg);
+
+		if(!m_block.getConfig().support16BitSCMode)
+		{
+			if(!_mask24)
+				return _reg;
+			m_asm.and_(r, asmjit::Imm(0xffffff));
+			return _reg;
+		}
+
+		if(const auto* mode = m_block.getMode())
+		{
+			if(mode->testSR(SRB_SC))
+				m_asm.and_(r, asmjit::Imm(0x00ffff));
+			else if(_mask24)
+				m_asm.and_(r, asmjit::Imm(0xffffff));
+		}
+		else
+		{
+			assert(false && "dynamic SC bit needs implementation");
+		}
+		return _reg;
 	}
 
 	void JitDspRegs::setPC(const DspValue& _pc) const

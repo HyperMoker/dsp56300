@@ -11,30 +11,37 @@ constexpr bool g_debugMemoryWrites = false;
 
 namespace dsp56k
 {
-	void Jitmem::mov(void* _dst, const uint32_t& _imm) const
+	void Jitmem::mov(uint32_t* _dst, const uint32_t& _imm) const
 	{
+#ifdef HAVE_X86_64
+		const RegScratch reg(m_block);
+		const auto p = makePtr(reg, _dst, sizeof(_imm));
+		m_block.asm_().mov(p, asmjit::Imm(_imm));
+#else
 		const RegGP src(m_block);
 		m_block.asm_().mov(r32(src), asmjit::Imm(_imm));
-		mov(_dst, src, sizeof(uint32_t));
+		mov<sizeof(_imm)>(_dst, src);
+#endif
 	}
 
-	void Jitmem::mov(void* _dst, const uint64_t& _imm) const
+	void Jitmem::mov(uint64_t* _dst, const uint64_t& _imm) const
 	{
 		const RegGP src(m_block);
 		m_block.asm_().mov(r64(src), asmjit::Imm(_imm));
-		mov(_dst, src, sizeof(uint64_t));
+		mov<sizeof(_imm)>(_dst, src);
 	}
 
-	void Jitmem::mov(void* _dst, const JitRegGP& _src, const uint32_t _size) const
+	template<size_t ByteSize>
+	void Jitmem::mov(void* _dst, const JitRegGP& _src) const
 	{
 		const RegScratch reg(m_block);
-		const auto p = makePtr(reg, _dst, _size);
-		mov(p, _src);
+		const auto p = makePtr(reg, _dst, ByteSize);
+		mov<ByteSize>(p, _src);
 	}
 
 	void Jitmem::mov(uint64_t& _dst, const JitRegGP& _src) const
 	{
-		mov(&_dst, _src, sizeof(uint64_t));
+		mov<sizeof(_dst)>(&_dst, _src);
 	}
 
 	void Jitmem::mov(uint64_t& _dst, const DspValue& _src) const
@@ -47,7 +54,7 @@ namespace dsp56k
 		}
 		else
 		{
-			mov(&_dst, _src.get(), sizeof(uint64_t));
+			mov<sizeof(_dst)>(&_dst, _src.get());
 		}
 	}
 
@@ -61,7 +68,7 @@ namespace dsp56k
 		}
 		else
 		{
-			mov(&_dst, _src.get(), sizeof(uint32_t));
+			mov<sizeof(_dst)>(&_dst, _src.get());
 		}
 	}
 
@@ -73,22 +80,25 @@ namespace dsp56k
 
 	void Jitmem::mov(const JitRegGP& _dst, const uint64_t& _src) const
 	{
-		mov(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
+		mov<sizeof(_src)>(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
 	}
 
 	void Jitmem::mov(const JitRegGP& _dst, const uint32_t& _src) const
 	{
-		mov(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
+		mov<sizeof(_src)>(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
 	}
 
 	void Jitmem::mov(const JitRegGP& _dst, const uint8_t& _src) const
 	{
-		mov(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
+		mov<sizeof(_src)>(_dst, makePtr(r64(_dst), &_src, sizeof(_src)));
 	}
 
+	template<size_t ByteSize>
 	void Jitmem::mov(const JitMemPtr& _dst, const JitRegGP& _src) const
 	{
-		switch (_dst.size())
+		static_assert(ByteSize == sizeof(TWord) || ByteSize == sizeof(uint64_t) || ByteSize == sizeof(uint8_t));
+
+		switch (ByteSize)
 		{
 		case sizeof(TWord):
 			m_block.asm_().mov(_dst, r32(_src));
@@ -104,14 +114,20 @@ namespace dsp56k
 #endif
 			break;
 		default:
-			assert(false && "unknown memory size");
 			break;
 		}
 	}
 
+	template void Jitmem::mov<1>(const JitMemPtr& _dst, const JitRegGP& _src) const;
+	template void Jitmem::mov<4>(const JitMemPtr& _dst, const JitRegGP& _src) const;
+	template void Jitmem::mov<8>(const JitMemPtr& _dst, const JitRegGP& _src) const;
+
+	template<size_t ByteSize>
 	void Jitmem::mov(const JitRegGP& _dst, const JitMemPtr& _src) const
 	{
-		switch (_src.size())
+		static_assert(ByteSize == sizeof(TWord) || ByteSize == sizeof(uint64_t) || ByteSize == sizeof(uint8_t));
+
+		switch (ByteSize)
 		{
 		case sizeof(TWord):
 			m_block.asm_().mov(r32(_dst), _src);
@@ -127,16 +143,17 @@ namespace dsp56k
 #endif
 			break;
 		default:
-			assert(false && "unknown memory size");
 			break;
 		}
 	}
+	template void Jitmem::mov<1>(const JitRegGP& _dst, const JitMemPtr& _src) const;
+	template void Jitmem::mov<4>(const JitRegGP& _dst, const JitMemPtr& _src) const;
+	template void Jitmem::mov<8>(const JitRegGP& _dst, const JitMemPtr& _src) const;
 
+	template<size_t ByteSize>
 	void Jitmem::mov(const JitMemPtr& _dst, const uint64_t& _immSrc) const
 	{
 		const auto imm = asmjit::Imm(_immSrc);
-
-		assert(_dst.size());
 
 		JitRegGP temp;
 		RegGP t(m_block, false);
@@ -157,15 +174,35 @@ namespace dsp56k
 		}
 
 #ifdef HAVE_ARM64
-		if (_dst.size() <= sizeof(uint32_t))
+		if (ByteSize <= sizeof(uint32_t))
 			m_block.asm_().mov(r32(temp), imm);
 		else
 			m_block.asm_().mov(r64(temp), imm);
-		mov(_dst, temp);
+		mov<ByteSize>(_dst, temp);
 #else
-		m_block.asm_().mov(_dst, imm);
+		auto ptr = _dst;
+		ptr.setSize(ByteSize);
+		m_block.asm_().mov(ptr, imm);
 #endif
 	}
+
+	template void Jitmem::mov<1>(const JitMemPtr& _dst, const uint64_t& _immSrc) const;
+	template void Jitmem::mov<4>(const JitMemPtr& _dst, const uint64_t& _immSrc) const;
+
+	template <size_t ByteSize> void Jitmem::mov(const JitMemPtr& _dst, const DspValue& _src) const
+	{
+		if(_src.isImmediate())
+		{
+			mov<ByteSize>(_dst, _src.imm());
+		}
+		else
+		{
+			mov<ByteSize>(_dst, _src.get());
+		}
+	}
+
+	template void Jitmem::mov<1>(const JitMemPtr& _dst, const DspValue& _src) const;
+	template void Jitmem::mov<4>(const JitMemPtr& _dst, const DspValue& _src) const;
 
 	void Jitmem::makeBasePtr(const JitReg64& _base, const void* _ptr, const size_t _size/* = sizeof(uint64_t)*/) const
 	{
@@ -173,17 +210,33 @@ namespace dsp56k
 		m_block.asm_().mov(_base, asmjit::Imm(_ptr));
 #else
 		const auto p = m_block.dspRegPool().makeDspPtr(_ptr, _size);
-		if(p.hasSize())
+		if(isValid(p))
 			m_block.asm_().lea(_base, p);
 		else
 			m_block.asm_().mov(_base, asmjit::Imm(reinterpret_cast<uint64_t>(_ptr)));
 #endif
 	}
 
+	int32_t Jitmem::pointerOffset(const void* _target, const void* _source)
+	{
+		assert(_target != _source);
+
+		const uint64_t target = reinterpret_cast<int64_t>(_target);
+		const uint64_t source = reinterpret_cast<int64_t>(_source);
+
+		const auto diffU = target - source;
+		const auto diff = static_cast<int64_t>(diffU);
+
+		if(diff > std::numeric_limits<int32_t>::max() || diff < std::numeric_limits<int32_t>::min())
+			return 0;
+
+		return static_cast<int32_t>(diff);
+	}
+
 	JitMemPtr Jitmem::makePtr(const JitReg64& _base, const JitRegGP& _index, const uint32_t _shift, const uint32_t _size)
 	{
 #ifdef HAVE_ARM64
-		auto p = asmjit::arm::ptr(_base, _index, asmjit::arm::Shift(asmjit::arm::ShiftOp::kLSL, _shift));
+		auto p = asmjit::a64::ptr(_base, _index, asmjit::arm::Shift(asmjit::arm::ShiftOp::kLSL, _shift));
 		p.setSize(_size);
 		return p;
 #else
@@ -194,7 +247,7 @@ namespace dsp56k
 	JitMemPtr Jitmem::makePtr(const JitReg64& _base, const uint32_t _size)
 	{
 #ifdef HAVE_ARM64
-		auto p = asmjit::arm::ptr(_base, 0);
+		auto p = asmjit::a64::ptr(_base, 0);
 		p.setSize(_size);
 		return p;
 #else
@@ -206,7 +259,7 @@ namespace dsp56k
 	{
 		const auto p = m_block.dspRegPool().makeDspPtr(_hostPtr, _size);
 
-		if(p.hasSize())
+		if(isValid(p))
 			return p;
 
 		makeBasePtr(_scratch, _hostPtr, _size);
@@ -215,7 +268,13 @@ namespace dsp56k
 
 	JitMemPtr Jitmem::makeRelativePtr(const void* _ptr, const void* _base, const JitReg64& _baseReg, const size_t _size)
 	{
-		const auto offset = static_cast<const uint8_t*>(_ptr) - static_cast<const uint8_t*>(_base);
+		if(_ptr == _base)
+			return makePtr(_baseReg, static_cast<uint32_t>(_size));
+
+		const auto offset = pointerOffset(_ptr, _base);
+		if(!offset)
+			return {};
+
 #ifdef HAVE_ARM64
 		bool canBeEncoded = false;
 
@@ -229,11 +288,9 @@ namespace dsp56k
 				(_size == sizeof(uint64_t) && offset <= 32760 && (offset & 7) == 0))
 				canBeEncoded = true;
 		}
-#else
-		const auto canBeEncoded = offset >= std::numeric_limits<int>::min() && offset <= std::numeric_limits<int>::max();
-#endif
 		if(!canBeEncoded)
-			return makePtr(_baseReg, 0);
+			return {};
+#endif
 
 		auto p = makePtr(_baseReg, static_cast<uint32_t>(_size));
 		p.setOffset(offset);
@@ -241,53 +298,48 @@ namespace dsp56k
 		return p;
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, const EMemArea _area, const JitRegGP& _offset, ScratchPMem& _basePtrPmem) const
+	void Jitmem::makeDspPtr(const JitReg64& _dst) const
 	{
-		ScratchPMem t(m_block);
-		t.temp(DspValue::Memory);
+		m_block.asm_().lea_(r64(_dst), r64(regDspPtr), &m_block.dsp(), &m_block.dsp().regs());
+	}
 
-		// push onto stack (if applicable) before branch
-		if(!_basePtrPmem.isRegValid())
-		{
-			_basePtrPmem.temp(DspValue::Memory);
-			_basePtrPmem.release();
-		}
-
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, const EMemArea _area, const JitRegGP& _offset, MemoryRef&& _ref) const
+	{
 		const SkipLabel skip(m_block.asm_());
 
 		if (!_dst.isRegValid())
 			_dst.temp(DspValue::Memory);
 
+		auto p = getMemAreaPtr(_dst, _area, _offset, std::move(_ref));
+
+		if(!hasMmuSupport())
+		{
 #ifdef HAVE_X86_64
-		if(asmjit::Support::isPowerOf2(m_block.dsp().memory().size(_area)))
-		{
-			// just return garbage in case memory is read from an invalid address
-			m_block.asm_().and_(r32(_offset), asmjit::Imm(asmjit::Imm(m_block.dsp().memory().size(_area)-1)));
-		}
-		else
+			if(asmjit::Support::isPowerOf2(m_block.dsp().memory().size(_area)))
+			{
+				// just return garbage in case memory is read from an invalid address
+				m_block.asm_().and_(r32(_offset), asmjit::Imm(asmjit::Imm(m_block.dsp().memory().size(_area)-1)));
+			}
+			else
 #endif
-		{
-			m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().size(_area)));
-			m_block.asm_().jge(skip.get());
+			{
+				m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().size(_area)));
+				m_block.asm_().jge(skip.get());
+			}
 		}
-
-		const auto p = getMemAreaPtr(t, _area, _offset, _basePtrPmem);
-
 		readDspMemory(_dst, p);
+
+		return p;
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const JitRegGP& _offsetX, const JitRegGP& _offsetY) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const JitRegGP& _offsetX, const JitRegGP& _offsetY) const
 	{
-		ScratchPMem pMem(m_block, false, true);
-		readDspMemory(_dstX, MemArea_X, _offsetX, pMem);
-		readDspMemory(_dstY, MemArea_Y, _offsetY, pMem);
+		auto px = readDspMemory(_dstX, MemArea_X, _offsetX, noRef());
+		return readDspMemory(_dstY, MemArea_Y, _offsetY, std::move(px));
 	}
 
 	void Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const JitRegGP& _offset) const
 	{
-		ScratchPMem t(m_block);
-		t.temp(DspValue::Memory);
-
 		if (!_dstX.isRegValid())
 			_dstX.temp(DspValue::Memory);
 		if (!_dstY.isRegValid())
@@ -295,74 +347,53 @@ namespace dsp56k
 
 		const SkipLabel skip(m_block.asm_());
 
+		if(!hasMmuSupport())
+		{
 #ifdef HAVE_X86_64
-		if (asmjit::Support::isPowerOf2(m_block.dsp().memory().sizeXY()))
-		{
-			// just return garbage in case memory is read from an invalid address
-			m_block.asm_().and_(_offset, asmjit::Imm(asmjit::Imm(m_block.dsp().memory().sizeXY() - 1)));
-		}
-		else
+			if (asmjit::Support::isPowerOf2(m_block.dsp().memory().sizeXY()))
+			{
+				// just return garbage in case memory is read from an invalid address
+				m_block.asm_().and_(r32(_offset), asmjit::Imm(asmjit::Imm(m_block.dsp().memory().sizeXY() - 1)));
+			}
+			else
 #endif
-		{
-			m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().sizeXY()));
-			m_block.asm_().jge(skip.get());
+			{
+				m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().sizeXY()));
+				m_block.asm_().jge(skip.get());
+			}
 		}
 
-		ScratchPMem pmem(m_block, false, true);
+		auto px = getMemAreaPtr(_dstX, MemArea_X, _offset, noRef());
+		readDspMemory(_dstX, px);
 
-		auto p = getMemAreaPtr(t, MemArea_X, _offset, pmem);
-		readDspMemory(_dstX, p);
-
-		p = getMemAreaPtr(t, MemArea_Y, _offset, pmem);
-		readDspMemory(_dstY, p);
+		auto py = getMemAreaPtr(_dstY, MemArea_Y, _offset, std::move(px));
+		readDspMemory(_dstY, py);
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const TWord& _offset) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const TWord& _offset) const
 	{
 		if (_offset >= m_block.dsp().memory().sizeXY())
-			return;
+			return noRef();
 
 		if (!_dstX.isRegValid())
 			_dstX.temp(DspValue::Memory);
 		if (!_dstY.isRegValid())
 			_dstY.temp(DspValue::Memory);
 
-		ScratchPMem pxmem(m_block, false, true);
-		auto p = getMemAreaPtr(pxmem, MemArea_X, _offset);
-		readDspMemory(_dstX, p);
+		auto memRefX = getMemAreaPtr(MemArea_X, _offset, noRef(), false);
+		readDspMemory(_dstX, memRefX);
 
-		const auto& mem = m_block.dsp().memory();
-
-		if(_offset < mem.getBridgedMemoryAddress())
-		{
-			const auto off = reinterpret_cast<uint64_t>(mem.y) - reinterpret_cast<uint64_t>(mem.x);
-
-#ifdef HAVE_ARM64
-			if (pxmem.isRegValid() && off < 0x1000000) // ARM can only deal with 24 bit immediates in an add()
-#else
-			if (pxmem.isRegValid())
-#endif
-			{
-				m_block.asm_().add(r64(pxmem), off);
-			}
-			else
-				p = getMemAreaPtr(pxmem, MemArea_Y, _offset);
-		}
-		else
-		{
-			assert(false);
-		}
-
-		readDspMemory(_dstY, p);
+		auto memRefY = getMemAreaPtr(MemArea_Y, _offset, std::move(memRefX), false);
+		readDspMemory(_dstY, memRefY);
+		return memRefY;
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, TWord _offset) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, const EMemArea _area, const TWord _offset) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		readDspMemory(_dst, _area, _offset, pmem);
+		return readDspMemory(_dst, _area, _offset, noRef());
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, TWord _offset, ScratchPMem& _basePtrPmem) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, TWord _offset, MemoryRef&& _ref) const
 	{
 		const auto& mem = m_block.dsp().memory();
 		mem.memTranslateAddress(_area, _offset);
@@ -370,51 +401,48 @@ namespace dsp56k
 		assert(_offset < mem.size(_area) && "memory address out of range");
 
 		if (_offset >= mem.size(_area))
-			return;
+			return std::move(_ref);
 
-		ScratchPMem t(m_block);
-
-		const auto p = getMemAreaPtr(t, _area, _offset, _basePtrPmem);
+		auto p = getMemAreaPtr(_area, _offset, std::move(_ref), false);
 
 		if (!_dst.isRegValid())
 			_dst.temp(DspValue::Memory);
 
 		readDspMemory(_dst, p);
+
+		return p;
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, const DspValue& _offset) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, const EMemArea _area, const DspValue& _offset) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		readDspMemory(_dst, _area, _offset, pmem);
+		return readDspMemory(_dst, _area, _offset, noRef());
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, const DspValue& _offset, ScratchPMem& _basePtrPmem) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, const EMemArea _area, const DspValue& _offset, MemoryRef&& _ref) const
 	{
 		if (_offset.isType(DspValue::Immediate24))
-			readDspMemory(_dst, _area, _offset.imm24(), _basePtrPmem);
-		else
-			readDspMemory(_dst, _area, _offset.get(), _basePtrPmem);
+			return readDspMemory(_dst, _area, _offset.imm24(), std::move(_ref));
+		return readDspMemory(_dst, _area, _offset.get(), std::move(_ref));
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const DspValue& _offsetX, const DspValue& _offsetY) const
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const DspValue& _offsetX, const DspValue& _offsetY) const
 	{
 		if(_offsetX.isImm24() || _offsetY.isImm24())
 		{
-			ScratchPMem ppmem(m_block, false, true);
+			MemoryRef ref(m_block);
 
 			if (_offsetX.isImm24())
-				readDspMemory(_dstX, MemArea_X, _offsetX.imm24(), ppmem);
+				ref = readDspMemory(_dstX, MemArea_X, _offsetX.imm24(), std::move(ref));
 			else
-				readDspMemory(_dstX, MemArea_X, _offsetX.get(), ppmem);
+				ref = readDspMemory(_dstX, MemArea_X, _offsetX.get(), std::move(ref));
 			if (_offsetY.isImm24())
-				readDspMemory(_dstY, MemArea_Y, _offsetY.imm24(), ppmem);
+				ref = readDspMemory(_dstY, MemArea_Y, _offsetY.imm24(), std::move(ref));
 			else
-				readDspMemory(_dstY, MemArea_Y, _offsetY.get(), ppmem);
+				ref = readDspMemory(_dstY, MemArea_Y, _offsetY.get(), std::move(ref));
+			return ref;
 		}
-		else
-		{
-			readDspMemory(_dstX, _dstY, _offsetX.get(), _offsetY.get());
-		}
+
+		return readDspMemory(_dstX, _dstY, _offsetX.get(), _offsetY.get());
 	}
 
 	void Jitmem::readDspMemory(DspValue& _dstX, DspValue& _dstY, const DspValue& _offset) const
@@ -432,7 +460,7 @@ namespace dsp56k
 		_dsp->memory().dspWrite(a, o, _value);
 	}
 
-	void Jitmem::writeDspMemory(const EMemArea _area, const JitRegGP& _offset, const DspValue& _src, ScratchPMem& _basePtrPmem) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(const EMemArea _area, const JitRegGP& _offset, const DspValue& _src, MemoryRef&& _ref) const
 	{
 		if(m_block.getConfig().memoryWritesCallCpp || g_debugMemoryWrites)
 		{
@@ -444,7 +472,7 @@ namespace dsp56k
 			if(_src.isImm24())
 			{
 				m_block.asm_().mov(r32(r2), r32(_offset));
-				m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
+				makeDspPtr(r0);
 				m_block.asm_().mov(r32(r1), asmjit::Imm(_area));
 				m_block.asm_().mov(r32(r3), asmjit::Imm(_src.imm24()));
 			}
@@ -468,165 +496,137 @@ namespace dsp56k
 					m_block.asm_().mov(r32(r3), r32(_src.get()));
 				}
 
-				m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
+				makeDspPtr(r0);
 				m_block.asm_().mov(r32(r1), asmjit::Imm(_area));
 			}
 
 			m_block.stack().call(asmjit::func_as_ptr(&callDSPMemWrite));
+
+			return std::move(_ref);
 		}
 		else
 		{
-			ScratchPMem t(m_block);
-			t.temp(DspValue::Memory);
-
-			// push onto stack (if applicable) before branch
-			if(!_basePtrPmem.isRegValid())
-			{
-				_basePtrPmem.temp(DspValue::Memory);
-				_basePtrPmem.release();
-			}
+			DspValue tempXY(m_block);
+			auto p = getMemAreaPtr(tempXY, _area, _offset, std::move(_ref));
 
 			const SkipLabel skip(m_block.asm_());
 
-			m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().size(_area)));
-			m_block.asm_().jge(skip.get());
-
-			const auto p = getMemAreaPtr(t, _area, _offset, _basePtrPmem);
+			if(!hasMmuSupport())
+			{
+				m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().size(_area)));
+				m_block.asm_().jge(skip.get());
+			}
 
 			writeDspMemory(p, _src);
+
+			return p;
 		}
 	}
 
-	void Jitmem::writeDspMemory(EMemArea _area, const JitRegGP& _offset, const DspValue& _src) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(EMemArea _area, const JitRegGP& _offset, const DspValue& _src) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		writeDspMemory(_area, _offset, _src, pmem);
+		return writeDspMemory(_area, _offset, _src, noRef());
 	}
 
-	void Jitmem::writeDspMemory(const JitRegGP& _offsetX, const JitRegGP& _offsetY, const DspValue& _srcX, const DspValue& _srcY) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(const JitRegGP& _offsetX, const JitRegGP& _offsetY, const DspValue& _srcX, const DspValue& _srcY) const
 	{
-		ScratchPMem pMem(m_block, false, true);
-		writeDspMemory(MemArea_X, _offsetX, _srcX, pMem);
-		writeDspMemory(MemArea_Y, _offsetY, _srcY, pMem);
+		auto px = writeDspMemory(MemArea_X, _offsetX, _srcX, noRef());
+		auto py = writeDspMemory(MemArea_Y, _offsetY, _srcY, std::move(px));
+		return py;
 	}
 
 	void Jitmem::writeDspMemory(const JitRegGP& _offset, const DspValue& _srcX, const DspValue& _srcY) const
 	{
-		ScratchPMem t(m_block);
-		t.temp(DspValue::Memory);
-
 		const SkipLabel skip(m_block.asm_());
 
-		m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().sizeXY()));
-		m_block.asm_().jge(skip.get());
+		if(!hasMmuSupport())
+		{
+			m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().sizeXY()));
+			m_block.asm_().jge(skip.get());
+		}
 
-		ScratchPMem pMem(m_block, false, true);
+		DspValue tempXY(m_block);
+		auto px = getMemAreaPtr(tempXY, MemArea_X, _offset, noRef());
+		writeDspMemory(px, _srcX);
 
-		auto p = getMemAreaPtr(t, MemArea_X, _offset, pMem);
-		writeDspMemory(p, _srcX);
-
-		p = getMemAreaPtr(t, MemArea_Y, _offset, pMem);
-		writeDspMemory(p, _srcY);
+		auto py = getMemAreaPtr(tempXY, MemArea_Y, _offset, std::move(px));
+		writeDspMemory(py, _srcY);
 	}
 
-	void Jitmem::writeDspMemory(const TWord& _offset, const DspValue& _srcX, const DspValue& _srcY) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(const TWord& _offset, const DspValue& _srcX, const DspValue& _srcY) const
 	{
 		if (_offset >= m_block.dsp().memory().sizeXY())
-			return;
+			return noRef();
 
-		ScratchPMem pxmem(m_block, false, true);
-		auto p = getMemAreaPtr(pxmem, MemArea_X, _offset);
+		auto p = getMemAreaPtr(MemArea_X, _offset, noRef(), false);
 		writeDspMemory(p, _srcX);
 
-		const auto& mem = m_block.dsp().memory();
+		// it makes no sense to write two values to the same memory address, which is the case for bridged memory. Skip second write in this case
+		if(_offset >= m_block.dsp().memory().getBridgedMemoryAddress())
+			return p;
 
-		if(_offset < mem.getBridgedMemoryAddress())
-		{
-			const auto off = reinterpret_cast<uint64_t>(mem.y) - reinterpret_cast<uint64_t>(mem.x);
-
-#ifdef HAVE_ARM64
-			if (pxmem.isRegValid() && off < 0x1000000) // ARM can only deal with 24 bit immediates in an add()
-#else
-			if (pxmem.isRegValid())
-#endif
-			{
-				m_block.asm_().add(r64(pxmem), off);
-			}
-			else
-				p = getMemAreaPtr(pxmem, MemArea_Y, _offset);
-		}
-		else
-		{
-			assert(false);
-		}
+		p = getMemAreaPtr(MemArea_Y, _offset, std::move(p), false);
 		writeDspMemory(p, _srcY);
+		return p;
 	}
 
-	void Jitmem::writeDspMemory(EMemArea _area, TWord _offset, const DspValue& _src) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(EMemArea _area, TWord _offset, const DspValue& _src) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		writeDspMemory(_area, _offset, _src, pmem);
+		return writeDspMemory(_area, _offset, _src, noRef());
 	}
 
-	void Jitmem::writeDspMemory(EMemArea _area, TWord _offset, const DspValue& _src, ScratchPMem& _basePtrPmem) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(EMemArea _area, TWord _offset, const DspValue& _src, MemoryRef&& _ref) const
 	{
 		if(m_block.getConfig().memoryWritesCallCpp || g_debugMemoryWrites)
 		{
-			const RegGP  r(m_block);
+			const RegGP r(m_block);
 			m_block.asm_().mov(r, asmjit::Imm(_offset));
-			writeDspMemory(_area, r.get(), _src);
+			return writeDspMemory(_area, r.get(), _src, std::move(_ref));
 		}
-		else
-		{
-			const auto& mem = m_block.dsp().memory();
-			mem.memTranslateAddress(_area, _offset);
 
-			assert(_offset < mem.size(_area) && "memory address out of range");
+		const auto& mem = m_block.dsp().memory();
+		mem.memTranslateAddress(_area, _offset);
 
-			if(_offset >= mem.size(_area))
-				return;
+		assert(_offset < mem.size(_area) && "memory address out of range");
 
-			ScratchPMem t(m_block);
+		if(_offset >= mem.size(_area))
+			return std::move(_ref);
 
-			const auto p = getMemAreaPtr(t, _area, _offset, _basePtrPmem);
-
-			writeDspMemory(p, _src);
-		}
+		auto p = getMemAreaPtr(_area, _offset, std::move(_ref), false);
+		writeDspMemory(p, _src);
+		return p;
 	}
 
-	void Jitmem::writeDspMemory(EMemArea _area, const DspValue& _offset, const DspValue& _src) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(const EMemArea _area, const DspValue& _offset, const DspValue& _src) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		writeDspMemory(_area, _offset, _src, pmem);
+		return writeDspMemory(_area, _offset, _src, noRef());
 	}
 
-	void Jitmem::writeDspMemory(EMemArea _area, const DspValue& _offset, const DspValue& _src, ScratchPMem& _basePtrPmem) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(EMemArea _area, const DspValue& _offset, const DspValue& _src, MemoryRef&& _ref) const
 	{
 		if (_offset.isType(DspValue::Immediate24))
-			writeDspMemory(_area, _offset.imm24(), _src, _basePtrPmem);
-		else
-			writeDspMemory(_area, _offset.get(), _src, _basePtrPmem);
+			return writeDspMemory(_area, _offset.imm24(), _src, std::move(_ref));
+		return writeDspMemory(_area, _offset.get(), _src, std::move(_ref));
 	}
 
-	void Jitmem::writeDspMemory(const DspValue& _offsetX, const DspValue& _offsetY, const DspValue& _srcX, const DspValue& _srcY) const
+	Jitmem::MemoryRef Jitmem::writeDspMemory(const DspValue& _offsetX, const DspValue& _offsetY, const DspValue& _srcX, const DspValue& _srcY) const
 	{
 		if(_offsetX.isImm24() || _offsetY.isImm24())
 		{
-			ScratchPMem ppmem(m_block, false, true);
+			auto r = noRef();
 			if(_offsetX.isImm24())
-				writeDspMemory(MemArea_X, _offsetX.imm24(), _srcX, ppmem);
+				r = writeDspMemory(MemArea_X, _offsetX.imm24(), _srcX, std::move(r));
 			else
-				writeDspMemory(MemArea_X, _offsetX.get(), _srcX, ppmem);
+				r = writeDspMemory(MemArea_X, _offsetX.get(), _srcX, std::move(r));
 
 			if (_offsetY.isImm24())
-				writeDspMemory(MemArea_Y, _offsetY.imm24(), _srcY, ppmem);
+				r = writeDspMemory(MemArea_Y, _offsetY.imm24(), _srcY, std::move(r));
 			else
-				writeDspMemory(MemArea_Y, _offsetY.get(), _srcY, ppmem);
+				r = writeDspMemory(MemArea_Y, _offsetY.get(), _srcY, std::move(r));
+			return r;
 		}
-		else
-		{
-			writeDspMemory(_offsetX.get(), _offsetY.get(), _srcX, _srcY);
-		}
+
+		return writeDspMemory(_offsetX.get(), _offsetY.get(), _srcX, _srcY);
 	}
 
 	void Jitmem::writeDspMemory(const DspValue& _offset, const DspValue& _srcX, const DspValue& _srcY) const
@@ -639,16 +639,18 @@ namespace dsp56k
 
 	TWord callDSPMemReadPeriph(DSP* const _dsp, const TWord _area, const TWord _offset, Instruction _inst)
 	{
-		return _dsp->getPeriph(_area)->read(_offset, _inst);
+		return _dsp->getPeriph(_area)->read(_offset | 0xff0000, _inst);
 	}
 
 	void callDSPMemWritePeriph(DSP* const _dsp, const TWord _area, const TWord _offset, const TWord _value)
 	{
-		_dsp->getPeriph(_area)->write(_offset, _value);
+		_dsp->getPeriph(_area)->write(_offset | 0xff0000, _value);
 	}
 
-	void Jitmem::readPeriph(DspValue& _dst, const EMemArea _area, const TWord& _offset, const Instruction _inst) const
+	void Jitmem::readPeriph(DspValue& _dst, const EMemArea _area, TWord _offset, const Instruction _inst) const
 	{
+		_offset |= 0xff0000;
+
 		auto* periph = m_block.dsp().getPeriph(_area);
 
 		const auto* memPtr = periph->readAsPtr(_offset, _inst);
@@ -668,7 +670,7 @@ namespace dsp56k
 			const FuncArg r2(m_block, 2);
 			const FuncArg r3(m_block, 3);
 
-			m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
+			makeDspPtr(r0);
 			m_block.asm_().mov(r32(r1), asmjit::Imm(_area == MemArea_Y ? 1 : 0));
 			m_block.asm_().mov(r32(r2), asmjit::Imm(_offset));
 			m_block.asm_().mov(r32(r3), asmjit::Imm(_inst));
@@ -690,9 +692,17 @@ namespace dsp56k
 			const FuncArg r2(m_block, 2);
 			const FuncArg r3(m_block, 3);
 
-			m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
+			auto assignArg = [this](const uint32_t _index, const JitRegGP& _d, const JitRegGP& _s)
+			{
+				if(_index == 0)
+					makeDspPtr(_d.as<JitReg64>());
+				else if(r32(_d) != r32(_s))
+					m_block.asm_().mov(r32(_d), r32(_s));
+			};
+
+			assignFuncArgs({r0, r2}, {regDspPtr, _offset}, assignArg);
+
 			m_block.asm_().mov(r32(r1), asmjit::Imm(_area == MemArea_Y ? 1 : 0));
-			m_block.asm_().mov(r32(r2), _offset);
 			m_block.asm_().mov(r32(r3), asmjit::Imm(_inst));
 
 			m_block.stack().call(asmjit::func_as_ptr(&callDSPMemReadPeriph));
@@ -732,20 +742,26 @@ namespace dsp56k
 		const FuncArg r2(m_block, 2);
 		const FuncArg r3(m_block, 3);
 
-		// value might be held in a func arg register, safe if we set the func arg for the value first
+		auto assignArg = [this](const uint32_t _index, const JitRegGP& _dst, const JitRegGP& _src)
+		{
+			if(_index == 0)
+				makeDspPtr(_dst.as<JitReg64>());
+			else if(r32(_dst) != r32(_src))
+				m_block.asm_().mov(r32(_dst), r32(_src));
+		};
+
 		if (_value.isImmediate())
 		{
+			assignFuncArgs({r0.get(), r2.get()}, {regDspPtr, _offset.as<JitRegGP>()}, assignArg);
+
 			m_block.asm_().mov(r32(r3), asmjit::Imm(_value.imm()));
 		}
 		else
 		{
-			if (r32(r3) != r32(_value.get()))
-				m_block.asm_().mov(r32(r3), r32(_value.get()));
+			assignFuncArgs({r0.get(), r2.get(), r3.get()}, {regDspPtr, _offset.as<JitRegGP>(), _value.get()}, assignArg);
 		}
 
-		m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
 		m_block.asm_().mov(r32(r1), asmjit::Imm(_area == MemArea_Y ? 1 : 0));
-		m_block.asm_().mov(r32(r2), _offset);
 
 		m_block.stack().call(asmjit::func_as_ptr(&callDSPMemWritePeriph));
 	}
@@ -756,19 +772,25 @@ namespace dsp56k
 		const FuncArg r1(m_block, 1);
 		const FuncArg r2(m_block, 2);
 		const FuncArg r3(m_block, 3);
-
-		// value might be held in a func arg register, safe if we set the func arg for the value first
+		
 		if (_value.isImmediate())
 		{
+			makeDspPtr(r0);
 			m_block.asm_().mov(r32(r3), asmjit::Imm(_value.imm()));
 		}
 		else
 		{
-			if(r32(r3) != r32(_value.get()))
-				m_block.asm_().mov(r32(r3), r32(_value.get()));
+			auto assignArg = [this](const uint32_t _index, const JitRegGP& _dst, const JitRegGP& _src)
+			{
+				if(_index == 0)
+					makeDspPtr(_dst.as<JitReg64>());
+				else if(r32(_dst) != r32(_src))
+					m_block.asm_().mov(r32(_dst), r32(_src));
+			};
+
+			assignFuncArgs({r0, r3}, {regDspPtr, _value.get()}, assignArg);
 		}
 
-		m_block.asm_().mov(r64(r0), asmjit::Imm(&m_block.dsp()));
 		m_block.asm_().mov(r32(r1), asmjit::Imm(_area == MemArea_Y ? 1 : 0));
 		m_block.asm_().mov(r32(r2), asmjit::Imm(_offset));
 
@@ -811,173 +833,300 @@ namespace dsp56k
 		}
 	}
 
-	JitMemPtr Jitmem::getMemAreaPtr(ScratchPMem& _scratch, EMemArea _area, TWord offset, const ScratchPMem& _ptrToPmem) const
+	Jitmem::MemoryRef Jitmem::noRef() const
 	{
-		return getMemAreaPtr(_scratch, _area, offset, _ptrToPmem.isRegValid() ? r64(_ptrToPmem.get()) : JitReg64());
+		return MemoryRef(m_block);
 	}
 
-	JitMemPtr Jitmem::getMemAreaPtr(ScratchPMem& _scratch, const EMemArea _area, TWord offset, const JitReg64& _ptrToPmem) const
+	bool Jitmem::hasMmuSupport() const
 	{
-		const auto& mem = m_block.dsp().memory();
-
-		const auto a = offset >= mem.getBridgedMemoryAddress() ? MemArea_P :_area;
-
-		if(_ptrToPmem.isValid() && a == MemArea_P && !offset)
-			return makePtr(_ptrToPmem, sizeof(TWord));
-
-		const TWord* hostPtr = getMemAreaHostPtr(a) + offset;
-
-		// try DSP regs pointer as base
-		{
-			auto p = m_block.dspRegPool().makeDspPtr(hostPtr, sizeof(TWord));
-
-			if(p.hasSize())
-				return p;
-		}
-
-		// if that didn't work and we have a valid P mem pointer, try relative to P memory
-		if(_ptrToPmem.isValid())
-		{
-			const auto hostPtrP = getMemAreaHostPtr(MemArea_P);
-
-			{
-				const auto p = makeRelativePtr(hostPtr, hostPtrP, _ptrToPmem, sizeof(TWord));
-				if(p.hasSize())
-					return p;
-			}
-
-			// Failed, too. Create a new pointer relative to P memory in our scratch reg
-
-			_scratch.temp(DspValue::Memory);
-			const auto s = r64(_scratch);
-
-			const auto off = reinterpret_cast<int64_t>(hostPtr) - reinterpret_cast<int64_t>(hostPtrP) + static_cast<int64_t>(offset) * sizeof(TWord);
-
-			m_block.asm_().lea_(s, _ptrToPmem, static_cast<int>(off));
-
-			return makePtr(s, sizeof(TWord));
-		}
-
-		// if that didn't work either we have to use absolute addressing
-		_scratch.temp(DspValue::Memory);
-		makeBasePtr(r64(_scratch.get()), hostPtr, sizeof(TWord));
-		return makePtr(r64(_scratch), sizeof(TWord));
+		return m_block.dsp().memory().hasMmuSupport();
 	}
 
-	void Jitmem::getMemAreaPtr(const JitReg64& _dst, EMemArea _area, TWord offset/* = 0*/, const JitRegGP& _ptrToPmem/* = JitRegGP()*/) const
+	void Jitmem::assignFuncArgs(const std::vector<JitRegGP>& _target, const std::vector<JitRegGP>& _source, const std::function<void(uint32_t, JitRegGP, JitRegGP)>&& _assignFunc)
 	{
-		const auto& mem = m_block.dsp().memory();
+		assert(_target.size() == _source.size());
 
-		const TWord* ptr = getMemAreaHostPtr(offset >= mem.getBridgedMemoryAddress() ? MemArea_P :_area);
+		std::unordered_map<uint32_t, JitRegGP> remainingSources;
+		std::unordered_map<uint32_t, JitRegGP> remainingTargets;
 
-		if(_ptrToPmem.isValid())
+		for(size_t i=0; i<_source.size(); ++i)
+			remainingSources.insert({static_cast<uint32_t>(i), _source[i]});
+
+		for(size_t i=0; i<_target.size(); ++i)
+			remainingTargets.insert({static_cast<uint32_t>(i), _target[i]});
+
+		auto equals = [&](const JitRegGP& _a, const JitRegGP& _b)
 		{
-			const auto off = reinterpret_cast<int64_t>(ptr) - reinterpret_cast<int64_t>(getMemAreaHostPtr(MemArea_P)) + static_cast<int64_t>(offset) * sizeof(TWord);
-
-			m_block.asm_().lea_(_dst, r64(_ptrToPmem), static_cast<int>(off));
-		}
-		else
-		{
-			return makeBasePtr(_dst, ptr + offset, sizeof(TWord));
-		}
-	}
-
-	JitMemPtr Jitmem::getMemAreaPtr(ScratchPMem& _dst, const EMemArea _area, const JitRegGP& _offset, ScratchPMem& _ptrToPmem) const
-	{
-		auto makeMemAreaPtr = [this, &_offset, &_dst](const EMemArea _a)
-		{
-#ifdef HAVE_X86_64
-			const auto ptrHost = getMemAreaHostPtr(_a);
-			const auto offset = reinterpret_cast<int64_t>(ptrHost) - reinterpret_cast<int64_t>(&m_block.dsp().regs());
-			if(offset >= std::numeric_limits<int32_t>::min() && offset <= std::numeric_limits<int32_t>::max())
-				return ptr(regDspPtr, _offset, 2, static_cast<int32_t>(offset), sizeof(TWord));
-#endif
-			return ptr(regDspPtr);
+			return r64(_a) == r64(_b);
 		};
 
-		// as we bridge to P memory there is no need to do anything here if the requested area is P anyway
-		if (_area == MemArea_P)
+		auto isTarget = [&](const JitRegGP& _reg)
 		{
-			if(_ptrToPmem.isRegValid())
-				return makePtr(r64(_ptrToPmem), _offset, 2, sizeof(TWord));
+			for (const auto& t : remainingTargets)
+			{
+				if(equals(t.second, _reg))
+					return true;
+			}
+			return false;
+		};
 
-			const auto areaPtr = makeMemAreaPtr(_area);
+		auto isSource = [&](const JitRegGP& _reg)
+		{
+			for (const auto& s : remainingSources)
+			{
+				if(equals(s.second, _reg))
+					return true;
+			}
+			return false;
+		};
 
-			if(areaPtr.hasSize())
-				return areaPtr;
+		// assign sources to targets as long as:
+		// - the target that we want to assign to is not another source
+		// - or target and source are equal registers anyway
 
-			_dst.temp(DspValue::Memory);
-			getMemAreaPtr(r64(_dst), _area);
+		bool assignedSomething = true;
+
+		while(assignedSomething)
+		{
+			assignedSomething = false;
+
+			for(auto it = remainingSources.begin(); it != remainingSources.end();)
+			{
+				const auto index = it->first;
+				const auto& source = it->second;
+
+				if(equals(_target[index], _source[index]) || !isSource(_target[index]))
+				{
+					_assignFunc(index, _target[index], _source[index]);
+					it = remainingSources.erase(it);
+					remainingTargets.erase(index);
+					assignedSomething = true;
+				}
+				else
+				{
+					++it;
+				}
+			}
 		}
-		else if(m_block.dsp().memory().hasMmuSupport())
+
+		assert(remainingTargets.empty() && remainingSources.empty());
+	}
+
+	Jitmem::MemoryRef Jitmem::getMemAreaPtr(const EMemArea _area, const TWord _offset, MemoryRef&& _ref, bool _supportIndexedAddressing) const
+	{
+		auto* hostPtr = getMemAreaHostPtr(_area) + _offset;
+
+		// nothing to do if _ref is already pointing to it
+		if(hostPtr == _ref.baseAddr)
+			return std::move(_ref);
+
+		JitMemPtr ptr;
+
+		if(!_ref.isValid())
 		{
-			const auto areaPtr = makeMemAreaPtr(_area);
-
-			if(areaPtr.hasSize())
-				return areaPtr;
-
-			_dst.temp(DspValue::Memory);
-			getMemAreaPtr(r64(_dst), _area);
+			ptr = makeRelativePtr(hostPtr, &m_block.dsp().regs(), regDspPtr, 4);
 		}
 		else
 		{
-			// P memory is used for all bridged external memory
-			auto& p = _ptrToPmem;
-			if(!p.isRegValid())
+			ptr = makeRelativePtr(hostPtr, _ref.baseAddr, _ref.reg, 4);
+		}
+
+		if(isValid(ptr))
+		{
+#ifdef HAVE_ARM64
+			// ARM does not have an addressing mode that supports both an index register and an offset
+			if(_supportIndexedAddressing && ptr.hasOffset())
+				return copyHostAddressToReg(_area, _offset, _ref);
+#endif
+			MemoryRef m(std::move(_ref));
+			m.ptr = ptr;
+			return m;
+		}
+
+		return copyHostAddressToReg(_area, _offset, _ref);
+	}
+
+	Jitmem::MemoryRef Jitmem::getMemAreaPtr(const EMemArea _area, const JitRegGP& _offset, MemoryRef&& _ref) const
+	{
+		DspValue tempXY(m_block);
+		return getMemAreaPtr(tempXY, _area, _offset, std::move(_ref));
+	}
+
+	Jitmem::MemoryRef Jitmem::getMemAreaPtr(DspValue& _tempXY, EMemArea _area, const JitRegGP& _offset,	MemoryRef&& _ref) const
+	{
+		if(_area == MemArea_P || hasMmuSupport())
+		{
+			auto m = getMemAreaPtr(_area, 0, std::move(_ref), true);
+			m.ptr.setIndex(_offset, 2);
+			return m;
+		}
+
+		// P memory is used for all bridged external memory
+
+		auto* hostPtrP = getMemAreaHostPtr(MemArea_P);
+		auto* hostPtrXY = getMemAreaHostPtr(_area);
+
+		DspValue tempXY(m_block);
+		DspValue tempP(m_block, false, true);
+
+		JitReg64 gpXY, gpP;
+
+		if(_ref.baseAddr == hostPtrP)
+			gpP = _ref.reg;
+		else if(_ref.baseAddr == hostPtrXY)
+			gpXY = _ref.reg;
+
+		if(!gpP.isValid())
+		{
+			copyHostAddressToReg(tempP, MemArea_P, 0, _ref);
+			gpP = r64(tempP);
+		}
+
+		if(!gpXY.isValid())
+		{
+			// handle edge cases such as move y:(r2),r2, in this case the provided temporary is equal to _offset
+			if(!_tempXY.isRegValid() || r64(_tempXY) == r64(_offset))
 			{
-				p.temp(DspValue::Memory);
-				getMemAreaPtr(r64(p), MemArea_P);
+				tempXY.temp(DspValue::Memory);
+				gpXY = r64(tempXY);
+			}
+			else
+			{
+				gpXY = r64(_tempXY);
+			}
+			m_block.asm_().lea_(gpXY, gpP, pointerOffset(hostPtrXY, hostPtrP));
+		}
+
+		m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().getBridgedMemoryAddress()));
+#ifdef HAVE_ARM64
+		m_block.asm_().csel(r64(gpXY), r64(gpP), r64(gpXY), asmjit::arm::CondCode::kGE);
+#else
+		m_block.asm_().cmovge(r64(gpXY), r64(gpP));
+#endif
+
+		_ref.reset();
+
+		auto r = noRef();
+
+		assert(r64(gpXY) != r64(_offset));
+
+		r.ptr.setBase(gpXY);
+		r.ptr.setIndex(_offset, 2);
+		r.ptr.setSize(sizeof(TWord));
+
+		return r;
+	}
+
+	void Jitmem::copyHostAddressToReg(DspValue& _dst, const EMemArea _area, const TWord _offset, const MemoryRef& _ref) const
+	{
+		const auto& mem = m_block.dsp().memory();
+
+		const TWord* ptr = getMemAreaHostPtr(_offset >= mem.getBridgedMemoryAddress() ? MemArea_P :_area) + _offset;
+
+		if(ptr == _ref.baseAddr)
+		{
+			if(r64(_dst) == r64(_ref.reg))
+				return;
+
+			if(!_dst.isRegValid())
+			{
+				_dst.temp(DspValue::Memory);
+				return;
 			}
 
+			assert(!_ref.value.isRegValid() && "hey caller, use _ref directly");
+			m_block.asm_().mov(r64(_dst), _ref.reg);
+			return;
+		}
+
+		if(!_dst.isRegValid())
 			_dst.temp(DspValue::Memory);
-			getMemAreaPtr(r64(_dst), _area);
 
-			m_block.asm_().cmp(r32(_offset), asmjit::Imm(m_block.dsp().memory().getBridgedMemoryAddress()));
-#ifdef HAVE_ARM64
-			m_block.asm_().csel(r64(_dst), r64(p), r64(_dst), asmjit::arm::CondCode::kGE);
-#else
-			m_block.asm_().cmovge(r64(_dst), r64(p));
-#endif
+		// try relative to memory reference
+		if(_ref.isValid())
+		{
+			const auto off = pointerOffset(ptr, _ref.baseAddr);
+			if(off)
+			{
+				assert(r64(_dst) != r64(_ref.reg));	// will not work on ARM
+
+				if(!m_block.asm_().lea_(r64(_dst), r64(_ref.reg), off))
+				{
+					_dst.temp(DspValue::Memory);
+					const auto r = m_block.asm_().lea_(r64(_dst), r64(_ref.reg), off);
+					assert(r);
+				}
+				return;
+			}
 		}
 
-		return makePtr(r64(_dst), _offset, 2, sizeof(TWord));
+		// try dsp reg
+		const auto off = pointerOffset(ptr, &m_block.dsp().regs());
+		if(off)
+		{
+			m_block.asm_().lea_(r64(_dst), r64(regDspPtr), off);
+			return;
+		}
+
+		// didn't work either, copy absolute address to register
+		return makeBasePtr(r64(_dst), ptr, sizeof(TWord));
 	}
 
-	void Jitmem::mov(const JitMemPtr& _dst, const DspValue& _src) const
+	Jitmem::MemoryRef Jitmem::copyHostAddressToReg(const EMemArea _area, const TWord _offset, const MemoryRef& _ref) const
 	{
-		if(_src.isImmediate())
-		{
-			mov(_dst, _src.imm());
-		}
-		else
-		{
-			assert((_src.getBitCount() == 8 && _dst.size() == sizeof(uint8_t)) || (_src.getBitCount() == 24 && _dst.size() == sizeof(TWord)) || (_src.getBitCount() >= 48 && _dst.size() == sizeof(uint64_t)));
-			mov(_dst, _src.get());
-		}
+		MemoryRef m(m_block);
+
+		copyHostAddressToReg(m.value, _area, _offset, _ref);
+
+		m.reg = r64(m.value);
+		m.baseAddr = getMemAreaHostPtr(_area) + _offset;
+		m.ptr = makePtr(m.reg, sizeof(TWord));
+
+		return m;
 	}
 
+	template<size_t ByteSize>
 	void Jitmem::mov(DspValue& _dst, const JitMemPtr& _src) const
 	{
 		assert(_dst.isRegValid());
-		assert((_dst.getBitCount() == 8 && _src.size() == sizeof(uint8_t)) || (_dst.getBitCount() == 24 && _src.size() == sizeof(TWord)) || (_dst.getBitCount() >= 48 && _src.size() == sizeof(uint64_t)));
 
-		mov(_dst.get(), _src);
+		switch (ByteSize)
+		{
+		case sizeof(uint8_t):
+			mov<sizeof(uint8_t)>(_dst.get(), _src);
+			break;
+		case sizeof(uint32_t):
+			assert(_dst.getBitCount() == 24);
+			mov<sizeof(TWord)>(_dst.get(), _src);
+			break;
+		default:
+			assert(_dst.getBitCount() >= 48);
+			mov<sizeof(uint64_t)>(_dst.get(), _src);
+		}
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, const JitMemPtr& _src) const
+	template void Jitmem::mov<1>(DspValue& _dst, const JitMemPtr& _src) const;
+	template void Jitmem::mov<4>(DspValue& _dst, const JitMemPtr& _src) const;
+
+	void Jitmem::readDspMemory(DspValue& _dst, const MemoryRef& _src) const
 	{
-		mov(r32(_dst.get()), _src);
+		mov<sizeof(TWord)>(_dst, _src.ptr);
 	}
 
 	void Jitmem::writeDspMemory(const JitMemPtr& _dst, const DspValue& _src) const
 	{
 		assert(_src.isRegValid());
-		mov(_dst, r32(_src.get()));
+		mov<sizeof(TWord)>(_dst, r32(_src.get()));
 	}
 
-	void Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, const JitRegGP& _offset) const
+	void Jitmem::writeDspMemory(const MemoryRef& _dst, const DspValue& _src) const
 	{
-		ScratchPMem pmem(m_block, false, true);
-		readDspMemory(_dst, _area, _offset, pmem);
+		writeDspMemory(_dst.ptr, _src);
+	}
+
+	Jitmem::MemoryRef Jitmem::readDspMemory(DspValue& _dst, EMemArea _area, const JitRegGP& _offset) const
+	{
+		return readDspMemory(_dst, _area, _offset, noRef());
 	}
 }

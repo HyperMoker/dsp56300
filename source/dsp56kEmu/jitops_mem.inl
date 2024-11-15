@@ -9,7 +9,7 @@
 
 namespace dsp56k
 {
-	template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR>()>::type*> JitOps::EffectiveAddressType JitOps::effectiveAddressType(const TWord _op) const
+	template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>*> JitOps::EffectiveAddressType JitOps::effectiveAddressType(const TWord _op) const
 	{
 		const TWord mmm = getFieldValue<Inst, Field_MMM>(_op);
 		const TWord rrr = getFieldValue<Inst, Field_RRR>(_op);
@@ -18,12 +18,12 @@ namespace dsp56k
 			return Immediate;
 
 		if(mmm == MMM_AbsAddr)
-			return m_opWordB >= XIO_Reserved_High_First ? Peripherals : Memory;
+			return isPeriphAddress(m_opWordB) ? Peripherals : Memory;
 
 		return Dynamic;
 	}
 
-	template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR>()>::type*> DspValue JitOps::effectiveAddress(const TWord _op)
+	template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>*> DspValue JitOps::effectiveAddress(const TWord _op)
 	{
 		const TWord mmm = getFieldValue<Inst, Field_MMM>(_op);
 		const TWord rrr = getFieldValue<Inst, Field_RRR>(_op);
@@ -31,12 +31,12 @@ namespace dsp56k
 		return updateAddressRegister(mmm, rrr);
 	}
 
-	template <Instruction Inst, typename std::enable_if<!hasField<Inst,Field_s>() && hasFields<Inst, Field_MMM, Field_RRR, Field_S>()>::type*> void JitOps::readMem(DspValue& _dst, const TWord _op)
+	template <Instruction Inst, std::enable_if_t<!hasFieldT<Inst,Field_s>() && has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>*> void JitOps::readMem(DspValue& _dst, const TWord _op)
 	{
 		readMem<Inst>(_dst, _op, getFieldValueMemArea<Inst>(_op));
 	}
 
-	template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR>()>::type*> JitOps::EffectiveAddressType JitOps::readMem(DspValue& _dst, const TWord _op, const EMemArea _area)
+	template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>*> JitOps::EffectiveAddressType JitOps::readMem(DspValue& _dst, const TWord _op, const EMemArea _area)
 	{
 		const auto eaType = effectiveAddressType<Inst>(_op);
 
@@ -59,36 +59,36 @@ namespace dsp56k
 		return eaType;
 	}
 
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>::type*> void JitOps::readMem(DspValue& _dst, TWord op) const
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>*> void JitOps::readMem(DspValue& _dst, TWord op) const
 	{
 		const auto area = getFieldValueMemArea<Inst>(op);
 		const auto offset = getFieldValue<Inst,Field_qqqqqq>(op);
 		m_block.mem().readPeriph(_dst, area, offset + 0xffff80, Inst);
 	}
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>::type*> void JitOps::readMem(DspValue& _dst, TWord op) const
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>*> void JitOps::readMem(DspValue& _dst, TWord op) const
 	{
 		const auto area = getFieldValueMemArea<Inst>(op);
 		const auto offset = getFieldValue<Inst,Field_pppppp>(op);
 		m_block.mem().readPeriph(_dst, area, offset + 0xffffc0, Inst);
 	}
-	template <Instruction Inst, typename std::enable_if<!hasField<Inst, Field_s>() && hasFields<Inst, Field_aaaaaa, Field_S>()>::type*> void JitOps::readMem(DspValue& _dst, TWord op) const
+	template <Instruction Inst, std::enable_if_t<!hasFieldT<Inst, Field_s>() && hasFields<Inst, Field_aaaaaa, Field_S>()>*> void JitOps::readMem(DspValue& _dst, TWord op) const
 	{
 		const auto area = getFieldValueMemArea<Inst>(op);
 		const auto offset = getFieldValue<Inst,Field_aaaaaa>(op);
 		m_block.mem().readDspMemory(_dst, area, offset);
 	}
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_S, Field_s>() && hasField<Inst, Field_aaaaaa>()>::type*> void JitOps::readMem(DspValue& _dst, TWord op, EMemArea _area) const
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_S, Field_s>() && hasFieldT<Inst, Field_aaaaaa>()>*> void JitOps::readMem(DspValue& _dst, TWord op, EMemArea _area) const
 	{
 		const auto offset = getFieldValue<Inst,Field_aaaaaa>(op);
 		m_block.mem().readDspMemory(_dst, _area, offset);
 	}
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>::type*> void JitOps::writeMem(TWord op, const DspValue& _src)
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>*> void JitOps::writeMem(TWord op, const DspValue& _src)
 	{
 		const auto area = getFieldValueMemArea<Inst>(op);
 		const auto offset = getFieldValue<Inst,Field_qqqqqq>(op);
 		m_block.mem().writePeriph(area, static_cast<TWord>(offset + 0xffff80), _src);
 	}
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>::type*> void JitOps::writeMem(TWord op, const DspValue& _src)
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>*> void JitOps::writeMem(TWord op, const DspValue& _src)
 	{
 		const auto area = getFieldValueMemArea<Inst>(op);
 		const auto offset = getFieldValue<Inst,Field_pppppp>(op);
@@ -114,7 +114,7 @@ namespace dsp56k
 			{
 				// things such as move r5,x:(r5)+ will have r5 in src while trying to update r5 in effectiveAddress<> before we write it. In this case, we need to copy r5 before it gets modified
 				const auto rIndex = getFieldValue<Inst, Field_RRR>(_op);
-				if (_src.isDspReg(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspR0 + rIndex)))
+				if (_src.isDspReg(static_cast<PoolReg>(PoolReg::DspR0 + rIndex)))
 					_src.toTemp();
 				const auto ea = effectiveAddress<Inst>(_op);
 				writeMemOrPeriph(_area, ea, _src);				
@@ -124,13 +124,13 @@ namespace dsp56k
 		return eaType;
 	}
 
-	template <Instruction Inst, typename std::enable_if<!hasField<Inst,Field_s>() && hasFields<Inst, Field_MMM, Field_RRR, Field_S>()>::type*> void JitOps::writeMem(const TWord _op, DspValue& _src)
+	template <Instruction Inst, std::enable_if_t<!hasFieldT<Inst,Field_s>() && has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>*> void JitOps::writeMem(const TWord _op, DspValue& _src)
 	{
 		const auto area = getFieldValueMemArea<Inst>(_op);
 		writeMem<Inst>(_op, area, _src);
 	}
 
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_S, Field_s>() && hasField<Inst, Field_aaaaaa>()>::type*> void JitOps::writeMem(TWord op, EMemArea _area, const DspValue& _src) const
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_S, Field_s>() && hasFieldT<Inst, Field_aaaaaa>()>*> void JitOps::writeMem(TWord op, EMemArea _area, const DspValue& _src) const
 	{
 		const auto offset = getFieldValue<Inst,Field_aaaaaa>(op);
 		m_block.mem().writeDspMemory(_area, offset, _src);
@@ -142,14 +142,13 @@ namespace dsp56k
 
 		DspValue compare(m_block, UsePooledTemp);
 
-		Jitmem::ScratchPMem pmem(m_block, false, true);
-		m_block.mem().readDspMemory(compare, MemArea_P, ea, pmem);
+		auto memRef = m_block.mem().readDspMemory(compare, MemArea_P, ea);
 
 		const auto skip = m_asm.newLabel();
 		m_asm.cmp(r32(compare), r32(_src));
 		m_asm.jz(skip);
 
-		m_block.mem().writeDspMemory(MemArea_P, ea, _src, pmem);
+		m_block.mem().writeDspMemory(MemArea_P, ea, _src, std::move(memRef));
 
 		m_block.mem().mov(m_block.pMemWriteAddress(), ea);
 		m_block.mem().mov(m_block.pMemWriteValue(), _src);

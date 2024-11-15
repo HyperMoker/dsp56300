@@ -9,6 +9,7 @@
 #endif
 
 #include "jitops_helper.inl"
+#include "opcodecycles.h"
 
 namespace dsp56k
 {
@@ -21,7 +22,7 @@ namespace dsp56k
 
 		DspValue a(m_block, addr, DspValue::Immediate24);
 
-		DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		DSPReg pc(m_block, PoolReg::DspPC, true, true);
 		If(m_block, m_blockRuntimeData, [&](auto _toFalse)
 		{
 			bitTestMemory<Inst>(op, BitValue, _toFalse);
@@ -41,7 +42,7 @@ namespace dsp56k
 		DspValue r(m_block);
 		decode_dddddd_read(r, dddddd);
 
-		DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		DSPReg pc(m_block, PoolReg::DspPC, true, true);
 		If(m_block, m_blockRuntimeData, [&](auto _toFalse)
 		{
 			bitTest<Inst>(op, r, BitValue, _toFalse);
@@ -51,36 +52,9 @@ namespace dsp56k
 		}, BMode == Bsr);
 	}
 
-	template<Instruction Inst, ExpectedBitValue BitValue> void JitOps::esaiFrameSyncSpinloop(TWord op)
-	{
-		// If the DSP is spinlooping while waiting for the ESAI frame sync to flip, we fast-forward the DSP instructions to make it happen ASAP
-		const auto bit = getBit<Inst>(op);
-		const auto addr = getFieldValue<Inst, Field_qqqqqq>(op) + 0xffff80;
-
-		if (m_opWordB == 0 && addr == Esai::M_SAISR && bit == Esai::M_TFS)
-		{
-			// op word B = jump to self, addr = ESAI status register, bit test for bit Transmit Frame Sync
-			DspValue count(m_block);
-
-			// Use our custom register to read the remaining number of instructions until frame sync flips
-			m_block.mem().readPeriph(count, MemArea_X, BitValue == BitSet ? Esai::RemainingInstructionsForFrameSyncFalse : Esai::RemainingInstructionsForFrameSyncTrue, Inst);
-
-			If(m_block, m_blockRuntimeData, [&](auto _toFalse)
-			{
-				// do nothing if the value is zero
-				m_asm.test_(r32(count.get()));
-				m_asm.jz(_toFalse);
-			}, [&]()
-			{
-				// If the value is positive, increase the number of executed instructions to make ESAI do the frame sync
-				m_block.increaseInstructionCount(r32(count.get()));
-			}, false);
-		}
-	}
-
 	template<Instruction Inst, BraMode Bmode> void JitOps::braIfCC(const TWord op, DspValue& offset)
 	{
-		const DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		const DSPReg pc(m_block, PoolReg::DspPC, true, true);
 
 		if constexpr (Bmode == Bra)
 		{
@@ -115,7 +89,7 @@ namespace dsp56k
 
 	template<Instruction Inst, JumpMode Bmode> void JitOps::jumpIfCC(const TWord op, DspValue& offset)
 	{
-		const DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		const DSPReg pc(m_block, PoolReg::DspPC, true, true);
 
 		if constexpr(Bmode == Jump)
 		{
@@ -146,7 +120,7 @@ namespace dsp56k
 		const auto addr = absAddressExt<Inst>();
 		DspValue a(m_block, addr, DspValue::Immediate24);
 
-		DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		DSPReg pc(m_block, PoolReg::DspPC, true, true);
 		If(m_block, m_blockRuntimeData, [&](auto _toFalse)
 		{
 			bitTestMemory<Inst>(_op, BitValue, _toFalse);
@@ -163,7 +137,7 @@ namespace dsp56k
 
 		const auto dddddd = getFieldValue<Inst,Field_DDDDDD>(op);
 
-		DSPReg pc(m_block, JitDspRegPool::DspPC, true, true);
+		DSPReg pc(m_block, PoolReg::DspPC, true, true);
 		If(m_block, m_blockRuntimeData, [&](auto _toFalse)
 		{
 			DspValue r(m_block);

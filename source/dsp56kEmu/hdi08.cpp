@@ -4,7 +4,29 @@
 
 namespace dsp56k
 {
-	HDI08::HDI08(IPeripherals& _peripheral) : m_periph(_peripheral), m_pendingTXInterrupts(0), m_rxRateLimit(200)
+	bool is56303(IPeripherals& _peripherals)
+	{
+		return dynamic_cast<Peripherals56303*>(&_peripherals) != nullptr;
+	}
+
+	Dma* getDma(IPeripherals& _peripherals)
+	{
+		if(auto* p = dynamic_cast<Peripherals56303*>(&_peripherals))
+			return &p->getDMA();
+
+		if(auto* p = dynamic_cast<Peripherals56362*>(&_peripherals))
+			return &p->getDMA();
+
+		return nullptr;
+	}
+
+	HDI08::HDI08(IPeripherals& _peripheral)
+	: m_periph(_peripheral)
+	, m_pendingTXInterrupts(0)
+	, m_rxRateLimit(200)
+	, m_dmaReqSourceReceive (is56303(_peripheral) ? DmaChannel::RequestSource::Hi08ReceiveDataFull : DmaChannel::RequestSource::HostReceiveData)
+	, m_dmaReqSourceTransmit(is56303(_peripheral) ? DmaChannel::RequestSource::Hi08TransmitDataEmpty : DmaChannel::RequestSource::HostTransmitData)
+	, m_dma(getDma(_peripheral))
 	{
 	}
 
@@ -15,68 +37,86 @@ namespace dsp56k
 
 		// Apply pending host flags, if applicable
 		const auto hf01 = m_pendingHostFlags01;
+
+		if(hf01 < 0)
+			return m_hsr;
+
 		m_pendingHostFlags01 = -1;
 
-		if(hf01 >= 0)
-		{
-			m_hsr &= ~0x18;
-			m_hsr |= static_cast<uint32_t>(hf01);
-		}
+		m_hsr &= ~0x18;
+		m_hsr |= static_cast<uint32_t>(hf01);
 
 		return m_hsr;
 	}
 
-	void HDI08::exec()
+	uint32_t HDI08::exec()
 	{
 		if (!bittest(m_hpcr, HPCR_HEN)) 
-			return;
+			return IPeripherals::MaxDelayCycles;
 
-		if (!m_waitServeRXInterrupt && rxInterruptEnabled() && !m_dataRX.empty())
+		if (!m_waitServeRXInterrupt && !m_dataRX.empty() && (rxInterruptEnabled() || hasDmaReceiveTrigger()))
 		{
 			const auto clock = m_periph.getDSP().getInstructionCounter();
 
-			const auto d = delta(clock, m_lastRXClock);
+			const auto d = clock - m_lastRXClock;
 			if(d >= m_rxRateLimit)
 			{
-				m_periph.getDSP().injectInterrupt(Vba_Host_Receive_Data_Full);
+				if(rxInterruptEnabled())
+					m_periph.getDSP().injectInterrupt(Vba_Host_Receive_Data_Full);
 				m_lastRXClock = clock;
 				m_waitServeRXInterrupt = true;
+				dmaTriggerReceive();
 //				LOG("Wait serve interrupt");
+				return 0;
+			}
+			return static_cast<uint32_t>(m_rxRateLimit - d);
+		}
+		if(m_transmitDataAlwaysEmpty)
+		{
+			if (m_pendingTXInterrupts > 0)
+			{
+				const auto interruptEnabled = txInterruptEnabled();
+				const auto dmaTriggered = dmaTriggerTransmit();
+
+				if(interruptEnabled || dmaTriggered)
+				{
+					--m_pendingTXInterrupts;
+					dsp56k::bitset<TWord, HSR_HTDE>(m_hsr, 1);
+
+					if(interruptEnabled)
+						m_periph.getDSP().injectInterrupt(Vba_Host_Transmit_Data_Empty);
+				}
+//				LOG("HTDE=1");
 			}
 		}
 		else
 		{
-			if(m_transmitDataAlwaysEmpty)
+			if (m_dataTX.empty())
 			{
-				if (txInterruptEnabled() && m_pendingTXInterrupts > 0)
-				{
-					--m_pendingTXInterrupts;
-					dsp56k::bitset<TWord, HSR_HTDE>(m_hsr, 1);
+				const auto hadHTDE = bittest(m_hsr, HSR_HTDE);
+				const auto injectInterrupt = txInterruptEnabled() && !hadHTDE;
+				dsp56k::bitset<TWord, HSR_HTDE>(m_hsr, 1);
+//				if(!hadHTDE)
 //					LOG("HTDE=1");
+				if (injectInterrupt)
+				{
+//					LOG("Inject HTDE");
 					m_periph.getDSP().injectInterrupt(Vba_Host_Transmit_Data_Empty);
 				}
-			}
-			else
-			{
-				if (m_dataTX.empty())
+				if(!hadHTDE)
 				{
-					const auto hadHTDE = bittest(m_hsr, HSR_HTDE);
-					const auto injectInterrupt = txInterruptEnabled() && !hadHTDE;
-					dsp56k::bitset<TWord, HSR_HTDE>(m_hsr, 1);
-//					if(!hadHTDE)
-//						LOG("HTDE=1");
-					if (injectInterrupt)
-					{
-//						LOG("Inject HTDE");
-						m_periph.getDSP().injectInterrupt(Vba_Host_Transmit_Data_Empty);
-					}
+					dmaTriggerTransmit();
 				}
 			}
 		}
+
+		return IPeripherals::MaxDelayCycles;
 	}
 
-	TWord HDI08::readRX(Instruction _inst)
+	TWord HDI08::readRX(const Instruction _inst)
 	{
+		m_periph.setDelayCycles(0);
+
 		if (m_dataRX.empty())
 		{
 			LOG("Empty read, PC=" << HEX(m_periph.getDSP().getPC().toWord()) << ", processingMode=" << m_periph.getDSP().getProcessingMode());
@@ -99,6 +139,7 @@ namespace dsp56k
 		default:
 			res = m_dataRX.pop_front();
 			m_waitServeRXInterrupt = false;
+			m_callbackRx();
 //			LOG("HDI08 RX = " << HEX(res) << " (pop)");
 			break;
 		}
@@ -115,16 +156,13 @@ namespace dsp56k
 //			LOG("Write RX: " << HEX(d));
 			m_dataRX.push_back(d);
 		}
+		m_periph.setDelayCycles(0);
 	}
 
 	void HDI08::clearRX()
 	{
 		m_dataRX.clear();
-	}
-
-	void HDI08::setPendingHostFlags01(uint32_t _pendingHostFlags)
-	{
-		m_pendingHostFlags01 = static_cast<int32_t>(_pendingHostFlags);
+		m_periph.setDelayCycles(0);
 	}
 
 	void HDI08::setHostFlags(const uint8_t _flag0, const uint8_t _flag1)
@@ -193,7 +231,7 @@ namespace dsp56k
 
 	void HDI08::writeHDR(TWord _val)
 	{
-		LOG("Write HDR: " << HEX(_val));
+//		LOG("Write HDR: " << HEX(_val));
 		m_hdr = _val;
 	}
 
@@ -246,6 +284,10 @@ namespace dsp56k
 		_disasm.addBitSymbol(Disassembler::MemX, HCR, HCR_HDM0, "HCR_HDM0");
 		_disasm.addBitSymbol(Disassembler::MemX, HCR, HCR_HDM1, "HCR_HDM1");
 		_disasm.addBitSymbol(Disassembler::MemX, HCR, HCR_HDM2, "HCR_HDM2");
+
+		_disasm.addSymbol(Disassembler::MemP, Vba_Host_Receive_Data_Full, "int_hdi08_receiveDataFull");
+		_disasm.addSymbol(Disassembler::MemP, Vba_Host_Command, "int_hdi08_hostCommand");
+		_disasm.addSymbol(Disassembler::MemP, Vba_Host_Transmit_Data_Empty, "int_hdi08_transmitDataEmpty");
 	}
 
 	void HDI08::injectTXInterrupt()
@@ -256,6 +298,8 @@ namespace dsp56k
 	uint32_t HDI08::readTX()
 	{
 		m_dataTX.waitNotEmpty();
+		if(!m_transmitDataAlwaysEmpty)
+			m_periph.setDelayCycles(0);
 		return m_dataTX.pop_front();
 	}
 
@@ -280,6 +324,8 @@ namespace dsp56k
 
 		if(m_callbackTx)
 			m_callbackTx();
+
+		m_periph.setDelayCycles(0);
 	}
 
 	void HDI08::writeControlRegister(TWord _val)
@@ -300,6 +346,8 @@ namespace dsp56k
 				dsp56k::bitset<TWord, HSR_HTDE>(m_hsr, 0);	// force inject
 		}
 
+		m_periph.setDelayCycles(0);
+
 		return;
 
 		if(!hadTXInterrupt && hasTXInterrupt)
@@ -319,5 +367,40 @@ namespace dsp56k
 		{
 			LOG("RX interrupt disabled");
 		}
+	}
+
+	void HDI08::writeStatusRegister(const TWord _val)
+	{
+//		LOG("Write HDI08 HSR " << HEX(_val));
+		m_hsr = _val;
+		m_periph.setDelayCycles(0);
+	}
+
+	void HDI08::writePortControlRegister(const TWord _val)
+	{
+		LOG("Write HDI08 HPCR " << HEX(_val));
+		m_hpcr = _val;
+		m_periph.setDelayCycles(0);
+	}
+
+	bool HDI08::dmaTriggerReceive() const
+	{
+		if(!m_dma)
+			return false;
+		return m_dma->trigger(m_dmaReqSourceReceive);
+	}
+
+	bool HDI08::dmaTriggerTransmit() const
+	{
+		if(!m_dma)
+			return false;
+		return m_dma->trigger(m_dmaReqSourceTransmit);
+	}
+
+	bool HDI08::hasDmaReceiveTrigger() const
+	{
+		if(!m_dma)
+			return false;
+		return m_dma->hasTrigger(m_dmaReqSourceReceive);
 	}
 };

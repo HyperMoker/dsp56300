@@ -6,81 +6,11 @@
 #include "dsp.h"
 #include "agu.h"
 
+// Unfortunaly headers for Windows ARM define mvn as an unscoped macro, we need to get rid of it as its an aarch64 instruction and we use it via asmjit
+#undef mvn
+
 namespace dsp56k
 {
-	void JitOps::getXY0(DspValue& _dst, const uint32_t _aluIndex, bool _signextend) const
-	{
-		if(!_dst.isRegValid())
-			_dst.temp(DspValue::Temp24);
-		else
-			assert(_dst.getBitCount() == 24);
-
-		const auto& src = m_block.dspRegPool().get(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _aluIndex), true, false);
-		if(_signextend)
-			m_asm.sbfx(r64(_dst), r64(src), asmjit::Imm(0), asmjit::Imm(24));
-		else
-			m_asm.ubfx(r64(_dst), r64(src), asmjit::Imm(0), asmjit::Imm(24));
-	}
-
-	void JitOps::getXY1(DspValue& _dst, const uint32_t _aluIndex, bool _signextend) const
-	{
-		if(!_dst.isRegValid())
-			_dst.temp(DspValue::Temp24);
-		else
-			assert(_dst.getBitCount() == 24);
-
-		const auto& src = m_block.dspRegPool().get(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _aluIndex), true, false);
-		if(_signextend)
-			m_asm.sbfx(r64(_dst), r64(src), asmjit::Imm(24), asmjit::Imm(24));
-		else
-			m_asm.ubfx(r64(_dst), r64(src), asmjit::Imm(24), asmjit::Imm(24));
-	}
-
-	void JitOps::setXY0(const uint32_t _xy, const DspValue& _src)
-	{
-		const auto temp = m_block.dspRegPool().get(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _xy), true, true);
-
-		if(_src.isImmediate())
-		{
-			if(_src.imm())
-			{
-				const RegScratch tempSrc(m_block);
-				m_asm.mov(tempSrc, asmjit::Imm(_src.imm()));
-				m_asm.bfi(r64(temp), r64(tempSrc), asmjit::Imm(0), asmjit::Imm(24));
-			}
-			else
-			{
-				m_asm.bfi(r64(temp), asmjit::a64::regs::xzr, asmjit::Imm(0), asmjit::Imm(24));
-			}
-		}
-		else
-		{
-			m_asm.bfi(r64(temp), r64(_src), asmjit::Imm(0), asmjit::Imm(24));
-		}
-	}
-
-	void JitOps::setXY1(const uint32_t _xy, const DspValue& _src)
-	{
-		const auto temp = m_block.dspRegPool().get(static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspX + _xy), true, true);
-		if (_src.isImmediate())
-		{
-			if (_src.imm())
-			{
-				const RegScratch tempSrc(m_block);
-				m_asm.mov(tempSrc, asmjit::Imm(_src.imm()));
-				m_asm.bfi(r64(temp), r64(tempSrc), asmjit::Imm(24), asmjit::Imm(24));
-			}
-			else
-			{
-				m_asm.bfi(r64(temp), asmjit::a64::regs::xzr, asmjit::Imm(24), asmjit::Imm(24));
-			}
-		}
-		else
-		{
-			m_asm.bfi(r64(temp), r64(_src), asmjit::Imm(24), asmjit::Imm(24));
-		}
-	}
-
 	void JitOps::getALU0(DspValue& _dst, uint32_t _aluIndex) const
 	{
 		if(!_dst.isRegValid())
@@ -205,7 +135,7 @@ namespace dsp56k
 
 	void JitOps::setMR(const JitReg64& _src) const
 	{
-		const auto& r = m_block.dspRegPool().get(JitDspRegPool::DspSR, true, true);
+		const auto& r = m_block.dspRegPool().get(PoolReg::DspSR, true, true);
 		m_asm.bfi(r, _src, asmjit::Imm(8), asmjit::Imm(8));
 	}
 
@@ -271,17 +201,15 @@ namespace dsp56k
 			const RegGP tester(m_block);
 			m_asm.mov(r32(tester), r32(_dst));
 
-			// lower limit
 			{
+				// lower limit
 				const RegScratch limit(m_block);
+
 				m_asm.mov(r32(limit), asmjit::Imm(0xff800000));
 				m_asm.cmp(r32(tester), r32(limit));
 				m_asm.csel(r32(_dst), r32(limit), r32(_dst), asmjit::arm::CondCode::kLT);
-			}
 
-			// upper limit
-			{
-				const RegScratch limit(m_block);
+				// upper limit
 				m_asm.mvn(r32(limit), r32(limit)); // = 0x007fffff
 				m_asm.cmp(r32(tester), r32(limit));
 				m_asm.csel(r32(_dst), r32(limit), r32(_dst), asmjit::arm::CondCode::kGT);

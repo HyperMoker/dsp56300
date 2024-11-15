@@ -9,7 +9,7 @@
 
 namespace asmjit
 {
-	inline namespace _abi_1_9
+	inline namespace ASMJIT_ABI_NAMESPACE
 	{
 		class BaseNode;
 	}
@@ -17,6 +17,7 @@ namespace asmjit
 
 namespace dsp56k
 {
+	class JitBlockRuntimeData;
 	class JitBlock;
 
 	class JitStackHelper
@@ -34,13 +35,11 @@ namespace dsp56k
 		void pop();
 
 		void popAll();
-
-		void pushNonVolatiles();
 		
-		void call(const void* _funcAsPtr, bool _isJitCall = false);
-		void call(const std::function<void()>& _execCall, bool _isJitCall = false);
-
 		void pushAllUsed(asmjit::BaseNode* _baseNode);
+
+		void call(const std::function<void()>& _execCall);
+		void call(const void* _funcAsPtr);
 
 		static bool isFuncArg(const JitRegGP& _gp, uint32_t _maxIndex = 255);
 		static bool isNonVolatile(const JitReg& _gp);
@@ -50,6 +49,8 @@ namespace dsp56k
 		void setUsed(const JitReg& _reg);
 		void setUsed(const JitRegGP& _reg);
 		void setUsed(const JitReg128& _reg);
+
+		void setUnused(const JitReg& _reg);
 
 		const auto& getUsedRegs() const { return m_usedRegs; }
 
@@ -79,8 +80,6 @@ namespace dsp56k
 		{
 			uint32_t stackOffset = 0;
 			JitReg reg;
-			asmjit::BaseNode* cursorFirst = nullptr;
-			asmjit::BaseNode* cursorLast = nullptr;
 
 			bool operator < (const PushedReg& _r) const
 			{

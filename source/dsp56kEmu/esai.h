@@ -2,28 +2,21 @@
 
 #pragma once
 
-#include "audio.h"
+#include "esxi.h"
 #include "logging.h"
 #include "bitfield.h"
 
-#include <array>
-#include <vector>
-
 namespace dsp56k
 {
-	class EsaiClock;
+	class EsxiClock;
 	class Dma;
 	class Disassembler;
 	class IPeripherals;
+	class DSP;
 
-	class Esai : public Audio
+	class Esai : public Esxi
 	{
 	public:
-		using TxFrame = std::array<TWord, 6>;
-		using RxFrame = std::array<TWord, 4>;
-		using TxSlot = std::vector<TxFrame>;
-		using RxSlot = std::vector<RxFrame>;
-
 		enum AddressesX
 		{
 			M_PCRC	= 0xFFFFBF, // Port C GPIO Control Register
@@ -39,10 +32,6 @@ namespace dsp56k
 			M_TCR	= 0xFFFFB5, // ESAI Transmit Control Register (TCR)
 			M_SAICR	= 0xFFFFB4, // ESAI Control Register (SAICR)
 			M_SAISR	= 0xFFFFB3, // ESAI Status Register (SAISR)
-
-			// These are "reserved" according to the DSP family manual, we use these for emulator specific stuff
-			RemainingInstructionsForFrameSyncTrue = 0xFFFFAD,
-			RemainingInstructionsForFrameSyncFalse = 0xFFFFAC,
 
 			M_RX3	= 0xFFFFAB, // ESAI Receive Data Register 3 (RX3)
 			M_RX2	= 0xFFFFAA, // ESAI Receive Data Register 2 (RX2)
@@ -276,8 +265,23 @@ namespace dsp56k
 
 		explicit Esai(IPeripherals& _periph, EMemArea _area, Dma* _dma = nullptr);
 
-		bool execTX();
-		void execRX();
+		void setDSP(DSP* _dsp);
+
+		void execTX() override;
+		void execRX() override;
+
+		TWord hasEnabledTransmitters() const override { return getEnabledTransmitters(); }
+		TWord hasEnabledReceivers() const override { return getEnabledReceivers(); }
+
+		uint32_t getTransmitFrameSync() const
+		{
+			return bittest<TWord, M_TFS>(readStatusRegister());
+		}
+
+		uint32_t getReceiveFrameSync() const
+		{
+			return bittest<TWord, M_RFS>(readStatusRegister());
+		}
 
 		const TWord& readStatusRegister() const;
 
@@ -319,16 +323,10 @@ namespace dsp56k
 			m_cr = _val;
 		}
 
-		void writeReceiveClockControlRegister(TWord _val)
-		{
-			LOG("Write ESAI RCCR " << HEX(_val));
-			m_rccr = _val;
-		}
+		void writeReceiveClockControlRegister(TWord _val);
 
 		void writeTX(uint32_t _index, TWord _val);
 		TWord readRX(uint32_t _index);
-
-		void terminate();
 
 		TWord readTSMA() const
 		{
@@ -342,11 +340,6 @@ namespace dsp56k
 
 		void writeTSMA(TWord _tsma);
 		void writeTSMB(TWord _tsmb);
-
-		void setClockSource(EsaiClock* _clock)
-		{
-			m_clock = _clock;
-		}
 
 		static void setSymbols(Disassembler& _disasm, EMemArea _area);
 
@@ -384,16 +377,26 @@ namespace dsp56k
 			return (m_rccr & M_RPM) >> M_RPM0;
 		}
 
-		// divide by 1 (false) or 8 (true)
+		// divide by 1 (true) or 8 (false)
 		bool getTxClockPrescalerRange() const
 		{
 			return (m_tccr & M_TPSR) != 0;
 		}
 
-		// divide by 1 (false) or 8 (true)
+		// divide by 1 (true) or 8 (false)
 		bool getRxClockPrescalerRange() const
 		{
 			return (m_rccr & M_RPSR) != 0;
+		}
+
+		TWord getEnabledReceivers() const
+		{
+			return m_rcr & M_REM;
+		}
+
+		TWord getEnabledTransmitters() const
+		{
+			return m_tcr & M_TEM;
 		}
 
 		std::string getTccrAsString() const;
@@ -402,13 +405,15 @@ namespace dsp56k
 		std::string getTcrAsString() const;
 		std::string getRcrAsString() const;
 
+		const auto& getSR() const { return m_sr; }
+
 	private:
 		bool inputEnabled(uint32_t _index) const	{ return m_rcr.test(static_cast<RcrBits>(_index)); }
 		bool outputEnabled(uint32_t _index) const	{ return m_tcr.test(static_cast<TcrBits>(_index)); }
 
-		void injectInterrupt(const TWord _interrupt) const;
-		void readAudioInput();
-		void writeAudioOutput();
+		void injectInterrupt(TWord _interrupt) const;
+		void readSlotFromFrame();
+		void writeSlotToFrame();
 
 		IPeripherals& m_periph;
 		const EMemArea m_area;
@@ -423,11 +428,11 @@ namespace dsp56k
 		TWord m_rccr = 0;							// receive clock control register
 		TWord m_tccr = 0;							// transmit clock control register
 
-		TxFrame m_tx;								// Words written by the DSP 
-		RxFrame m_rx;								// Words for the DSP to read
+		TxSlot m_tx;								// Words written by the DSP 
+		RxSlot m_rx;								// Words for the DSP to read
 
-		TxSlot m_txSlot;
-		RxSlot m_rxSlot;
+		TxFrame m_txFrame;
+		RxFrame m_rxFrame;
 		
 		uint32_t m_writtenTX = 0;
 		uint32_t m_readRX = 0;
@@ -439,6 +444,6 @@ namespace dsp56k
 		TWord m_tsma = 0xffff;
 		TWord m_tsmb = 0xffff;
 
-		EsaiClock* m_clock = nullptr;
+		TWord m_vbaRead = 0;
 	};
 }

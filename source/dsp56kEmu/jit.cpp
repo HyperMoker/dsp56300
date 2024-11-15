@@ -8,6 +8,8 @@
 
 #include "asmjit/core/jitruntime.h"
 
+#define WAIT_FOR_PROFILER 0
+
 using namespace asmjit;
 
 namespace dsp56k
@@ -43,8 +45,14 @@ namespace dsp56k
 		static_assert(!contains(g_dspPoolXmms, regXMMTempA), "XMM temp registers must not overlap with XMM pool registers");
 		static_assert(!contains(g_dspPoolXmms, regLastModAlu), "XMM temp registers must not contain XMM that holds the last modified ALU reg");
 		static_assert(!contains(g_dspPoolGps, regDspPtr), "GP pool registers must not contain GP that holds the dsp register pointer");
+		static_assert(!contains(g_dspPoolGps, regReturnVal), "GP pool registers must not contain GP that is used as scratch register");
 		static_assert(!checkOverlap(g_funcArgGPs, g_regGPTemps), "GP temp registers must not overlap with function argument GPs");
 		static_assert(!checkOverlap(g_funcArgGPs, g_nonVolatileGPs), "function argument registers cannot be non-volatile");
+
+		// these are important as we do not have to push anything on the stack for simple functions if we can use volatiles only
+		static_assert(!contains(g_nonVolatileGPs, *g_regGPTemps.begin()), "first temp must be volatile");
+		static_assert(!contains(g_nonVolatileGPs, regDspPtr), "register for DSP pointer must be volatile");
+		static_assert(!contains(g_nonVolatileGPs, g_dspPoolGps[0]), "first pool reg must be volatile");
 	}
 #endif
 	constexpr bool g_traceOps = false;
@@ -84,8 +92,34 @@ namespace dsp56k
 		m_emitters.reserve(16);
 		m_blockRuntimeDatas.reserve(0x10000);
 
+#if WAIT_FOR_PROFILER
+		// Wait for VTune profiler, somehow it does not immediately say that it is present
+		const auto now = std::chrono::system_clock::now();
+		while( std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - now) < std::chrono::milliseconds(10) )
+		{
+			if(JitProfilingSupport::isBeingProfiled())
+				break;
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+#endif
+
 		if (JitProfilingSupport::isBeingProfiled())
-			m_profiling.reset(new JitProfilingSupport(m_dsp));
+		{
+			LOG("Detected profiler, generating additional data for it");
+			try
+			{
+				m_profiling.reset(new JitProfilingSupport(m_dsp));
+			}
+			catch (const std::exception& e)
+			{
+				LOG("Failed to create profiler: " << e.what());
+				m_profiling.reset();
+			}
+		}
+		else
+		{
+			LOG("No profiler detected");
+		}
 	}
 
 	Jit::~Jit()
@@ -160,26 +194,26 @@ namespace dsp56k
 	void Jit::destroy(TWord _pc)
 	{
 		for (auto& it : m_chains)
-		{
 			it.second->destroy(_pc);
-		}
 	}
 
-	void Jit::emit(const TWord _pc)
+	void Jit::destroyToRecreate(TWord _pc)
 	{
-		auto* b = m_currentChain->emit(_pc);
-
-//		LOG("New block generated @ " << HEX(_pc) << " up to " << HEX(_pc + b->getPMemSize() - 1) << ", instruction count " << b->getEncodedInstructionCount() << ", disasm " << b->getDisasm());
+		for (auto& it : m_chains)
+			it.second->destroyToRecreate(_pc);
 	}
 
 	void Jit::notifyProgramMemWrite(const TWord _offset)
 	{
-		destroy(_offset);
+		for (auto& it : m_chains)
+			it.second->notifyPMemWrite(_offset, it.second.get() == m_currentChain);
+
+		m_maxUsedPAddress = std::max(m_maxUsedPAddress, static_cast<size_t>(_offset));
 	}
 
 	void Jit::run(const TWord _pc)
 	{
-		const auto* block = m_currentChain->getBlock(_pc);
+		const auto* block = m_currentChain->getBlockUnsafe(_pc);
 		block->getFunc()(this, _pc);
 
 		if(g_traceOps && m_dsp.m_trace)
@@ -204,8 +238,7 @@ namespace dsp56k
 
 	void Jit::runCheckPMemWriteAndModeChange(const TWord _pc)
 	{
-		run(_pc);
-		checkPMemWrite();
+		runCheckPMemWrite(_pc);
 		checkModeChange();
 	}
 
@@ -213,6 +246,17 @@ namespace dsp56k
 	{
 		run(_pc);
 		checkModeChange();
+	}
+
+	JitConfig Jit::getConfig(const TWord _pc) const
+	{
+		auto& globalConfig = getConfig();
+		if(!globalConfig.getBlockConfig)
+			return globalConfig;
+		auto localConfig = globalConfig.getBlockConfig(_pc);
+		if(localConfig)
+			return *localConfig;
+		return globalConfig;
 	}
 
 	void Jit::resetHW()
@@ -234,8 +278,11 @@ namespace dsp56k
 		if(i.hasFlag(JitBlockInfo::Flags::ModeChange))
 			return &funcRunCheckModeChange;
 
-		if (g_traceOps)
-			return &funcRun;
+		if constexpr(g_traceOps)
+		{
+			if(e.block->getFunc())
+				return &funcRun;
+		}
 
 		return e.block->getFunc();
 	}
@@ -276,13 +323,16 @@ namespace dsp56k
 
 		if(itExisting == m_chains.end())
 		{
-			m_currentChain = new JitBlockChain(*this, mode);
+			m_currentChain = new JitBlockChain(*this, mode, m_maxUsedPAddress);
 			m_chains.insert(std::make_pair(mode, m_currentChain));
 		}
 		else
 		{
 			m_currentChain = itExisting->second.get();
+			m_currentChain->setMaxUsedPAddress(m_maxUsedPAddress);
 		}
+
+		m_dsp.setJitEntries(m_currentChain->getFuncs().data());
 	}
 
 	void Jit::onDebuggerAttached(DebuggerInterface& _debugger) const
@@ -313,15 +363,15 @@ namespace dsp56k
 		checkModeChange();
 	}
 
-	JitBlockEmitter* Jit::acquireEmitter()
+	JitBlockEmitter* Jit::acquireEmitter(const TWord _pc)
 	{
 		if(m_emitters.empty())
-			return new JitBlockEmitter(dsp(), getRuntimeData(), getConfig());
+			return new JitBlockEmitter(dsp(), getRuntimeData(), getConfig(_pc));
 
 		auto* emitter = m_emitters.back();
 		m_emitters.pop_back();
 
-		emitter->reset();
+		emitter->reset(getConfig(_pc));
 
 		return emitter;
 	}
@@ -345,5 +395,13 @@ namespace dsp56k
 	void Jit::releaseBlockRuntimeData(JitBlockRuntimeData* _b)
 	{
 		m_blockRuntimeDatas.push_back(_b);
+	}
+
+	void Jit::onFuncsResized(const JitBlockChain& _chain) const
+	{
+		if(&_chain == m_currentChain)
+		{
+			m_dsp.setJitEntries(_chain.getFuncs().data());
+		}
 	}
 }

@@ -22,10 +22,10 @@ namespace dsp56k
 		const auto multipleWrapModulo = m_asm.newLabel();
 		const auto end = m_asm.newLabel();
 		
-		const DspValue m = makeDspValueAguReg(m_block, JitDspRegPool::DspM0, _rrr, true, false);
-		const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
+		const DspValue m = makeDspValueAguReg(m_block, PoolReg::DspM0, _rrr, true, false);
+		const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
 
-		m_asm.cmp(r32(m), asmjit::Imm(0xffffff));		// linear shortcut
+		m_asm.cmp(m.get().r16(), asmjit::Imm(0xffff));		// linear shortcut
 		m_asm.jnz(notLinear);
 
 		// linear:
@@ -64,7 +64,7 @@ namespace dsp56k
 		updateAddressRegisterSubBitreverse(_r, _n, _addN);
 
 		m_asm.bind(end);
-		m_asm.and_(_r, asmjit::Imm(0xffffff));
+		m_dspRegs.maskSC1624(_r);
 	}
 
 	void JitOps::updateAddressRegisterSubN1(const JitReg32& _r, uint32_t _rrr, bool _addN)
@@ -76,15 +76,15 @@ namespace dsp56k
 			return;
 		}
 
-		const DspValue moduloMask = makeDspValueAguReg(m_block, JitDspRegPool::DspM0mask, _rrr);
-		const DspValue m = makeDspValueAguReg(m_block, JitDspRegPool::DspM0, _rrr, true, false);
+		const DspValue moduloMask = makeDspValueAguReg(m_block, PoolReg::DspM0mask, _rrr);
+		const DspValue m = makeDspValueAguReg(m_block, PoolReg::DspM0, _rrr, true, false);
 
 		const auto notLinear = m_asm.newLabel();
 		const auto end = m_asm.newLabel();
 		const auto bitreverse = m_asm.newLabel();
 		const auto multiwrapModulo = m_asm.newLabel();
 
-		m_asm.cmp(r32(m), asmjit::Imm(0xffffff));		// linear shortcut
+		m_asm.cmp(m.get().r16(), asmjit::Imm(0xffff));		// linear shortcut
 		m_asm.jnz(notLinear);
 
 		if (_addN)	m_asm.inc(_r);
@@ -122,7 +122,7 @@ namespace dsp56k
 			updateAddressRegisterSubMultipleWrapModuloN1(_r, _addN, r32(moduloMask));
 
 		m_asm.bind(end);
-		m_asm.and_(_r, asmjit::Imm(0xffffff));
+		m_dspRegs.maskSC1624(_r);
 	}
 
 	void JitOps::updateAddressRegisterSubModuloN1(const JitReg32& _r, const JitReg32& _m, const JitReg32& _mMask, bool _addN) const
@@ -132,20 +132,18 @@ namespace dsp56k
 
 		if (!_addN)
 		{
-			m_asm.mov(p, _r);
-			m_asm.dec(p);
+			m_asm.lea(p, ptr(_r, -1));
 			m_asm.test(_r, _mMask);
 			m_asm.lea(_r, ptr(_r, _m));
-			m_asm.cmovne(_r, p);
+			m_asm.cmovnz(_r, p);
 		}
 		else
 		{
 			m_asm.mov(p, _r);
-			m_asm.and_(p, _mMask);
-			m_asm.cmp(p, _m);
-			m_asm.mov(p, -1);
-			m_asm.cmove(p, _m);
-			m_asm.sub(_r, p);
+			m_asm.sub(p, _m);
+			m_asm.inc(_r);
+			m_asm.test(p, _mMask);
+			m_asm.cmovz(_r, p);
 		}
 	}
 
@@ -159,7 +157,7 @@ namespace dsp56k
 
 		signextend24To32(n);
 
-		if(m_asm.hasBMI())
+		if(JitEmitter::hasBMI())
 		{
 			m_asm.andn(lowerBound, mMask, r);
 		}
@@ -175,8 +173,7 @@ namespace dsp56k
 		else
 			m_asm.sub(r, n);
 
-		m_asm.mov(mod, m);
-		m_asm.inc(mod);
+		m_asm.lea(mod, ptr(m, 1));
 
 		// if (n & mask) == 0
 		//     mod = 0

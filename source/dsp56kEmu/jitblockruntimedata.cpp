@@ -33,15 +33,13 @@ namespace dsp56k
 	{
 		m_func = nullptr;
 
-		m_pcFirst = 0;
-		m_pMemSize = 0;
 		m_lastOpSize = 0;
 		m_singleOpWordA = 0;
 		m_singleOpWordB = 0;
 		m_encodedInstructionCount = 0;
+		m_encodedCycles = 0;
 
 		m_dspAsm.clear();
-		m_possibleBranch = false;
 		m_child = g_invalidAddress;			// JIT block that we call
 		m_nonBranchChild = g_invalidAddress;
 		m_codeSize = 0;

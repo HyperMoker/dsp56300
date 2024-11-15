@@ -2,12 +2,14 @@
 
 #include <vector>
 #include <functional>
+#include <atomic>
 
 #include "opcodetypes.h"
 #include "types.h"
 #include "ringbuffer.h"
 #include "utils.h"
 #include "logging.h"
+#include "dma.h"
 
 namespace dsp56k
 {
@@ -59,6 +61,7 @@ namespace dsp56k
 		};
 
 		using CallbackTx = std::function<void()>;
+		using CallbackRx = std::function<void()>;
 
 		TWord readStatusRegister();
 
@@ -74,17 +77,9 @@ namespace dsp56k
 
 		void writeControlRegister(TWord _val);
 
-		void writeStatusRegister(const TWord _val)
-		{
-//			LOG("Write HDI08 HSR " << HEX(_val));
-			m_hsr = _val;
-		}
+		void writeStatusRegister(const TWord _val);
 
-		void writePortControlRegister(const TWord _val)
-		{
-			LOG("Write HDI08 HPCR " << HEX(_val));
-			m_hpcr = _val;
-		}
+		void writePortControlRegister(const TWord _val);
 
 		bool hasTX() const
 		{
@@ -93,17 +88,29 @@ namespace dsp56k
 		TWord readTX();
 		void writeTX(TWord _val);
 
-		void exec();
+		uint32_t exec();
 
 		TWord readRX(Instruction _inst);
 
-		void writeRX(const std::vector<TWord>& _data)		{ writeRX(&_data[0], _data.size()); }
+		void writeRX(const std::vector<TWord>& _data)		{ writeRX(_data.data(), _data.size()); }
 		void writeRX(const TWord* _data, size_t _count);
 		void clearRX();
-		
+
+		const auto& rxData() const { return m_dataRX; }
+		const auto& txData() const { return m_dataTX; }
+
 		bool hasRXData() const {return !m_dataRX.empty();}
 
-		void setPendingHostFlags01(uint32_t _pendingHostFlags);
+		void setPendingHostFlags01(uint32_t _pendingHostFlags)
+		{
+			m_pendingHostFlags01 = static_cast<int32_t>(_pendingHostFlags);
+		}
+
+		bool hasPendingHostFlags01() const
+		{
+			return m_pendingHostFlags01 >= 0;
+		}
+
 		void setHostFlags(uint8_t _flag0, uint8_t _flag1);
 		void setHostFlagsWithWait(uint8_t _flag0, uint8_t _flag1);
 		bool needsToWaitForHostFlags(uint8_t _flag0, uint8_t _flag1) const;
@@ -150,7 +157,19 @@ namespace dsp56k
 			m_rxRateLimit = _rateLimit;
 		}
 
+		void setReadRxCallback(const CallbackRx& _callback)
+		{
+			m_callbackRx = _callback;
+
+			if(!m_callbackRx)
+				m_callbackRx = [] {};
+		}
+
 	private:
+		bool dmaTriggerReceive() const;
+		bool dmaTriggerTransmit() const;
+		bool hasDmaReceiveTrigger() const;
+
 		TWord m_hsr = 0;
 		TWord m_hcr = 0;
 		TWord m_hpcr = 0;
@@ -158,13 +177,18 @@ namespace dsp56k
 		RingBuffer<TWord, 8192, true> m_dataTX;
 		IPeripherals& m_periph;
 		std::atomic<uint32_t> m_pendingTXInterrupts;
-		uint32_t m_lastRXClock = 0;
+		uint64_t m_lastRXClock = 0;
 		TWord m_hdr = 0;
 		TWord m_hddr = 0;
 		bool m_transmitDataAlwaysEmpty = true;
 		CallbackTx m_callbackTx;
+		CallbackRx m_callbackRx = [] {};
 		uint32_t m_rxRateLimit;		// minimum number of instructions between two RX interrupts
 		bool m_waitServeRXInterrupt = false;
 		int32_t m_pendingHostFlags01 = -1;
+
+		DmaChannel::RequestSource m_dmaReqSourceReceive;
+		DmaChannel::RequestSource m_dmaReqSourceTransmit;
+		Dma* m_dma;
 	};
 }

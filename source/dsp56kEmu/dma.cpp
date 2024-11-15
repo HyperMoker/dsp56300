@@ -1,5 +1,7 @@
 #include "dma.h"
 
+// DSP56300FM.pdf chapter 10 (page 181 ff)
+
 #include "dsp.h"
 #include "logging.h"
 #include "peripherals.h"
@@ -12,13 +14,65 @@
 #if 0
 #define LOGDMA(S) LOG(S)
 #else
-#define LOGDMA(S) {}
+#define LOGDMA(S) do{}while(0)
 #endif
 
 constexpr bool g_delayedDmaTransfer = true;
 
 namespace dsp56k
 {
+	namespace
+	{
+		using RequestSource = DmaChannel::RequestSource;
+
+		/*
+		Unfortunately the doc is a bit unclear here, at the moment we assume that DMA does never instantly trigger if it is enabled.
+		It needs the request from the peripheral and acts if its state **changes**
+
+		"
+		DMA Channel Enable
+		Enables the channel operation. Setting DE either triggers a single block DMA transfer
+		in the DMA transfer mode that uses DE as a trigger or enables a single-block,
+		single-line, or single-word DMA transfer in the transfer modes that use a requesting
+		device as a trigger."
+
+		For DE based triggers, it says  **triggers a ... transfer**, but for requests it says **enables a .... transfer**, assuming that
+		enabling means just setting it up so that its ready for transfer, but not immediately executing one
+		*/
+
+		bool checkTrigger(Peripherals56303& _p, const RequestSource _src)
+		{
+			return false;
+			switch (_src)
+			{
+			case RequestSource::Essi0TransmitData:			return _p.getEssi0().getSR().test(Essi::SSISR_TDE);
+			case RequestSource::Essi0ReceiveData:			return _p.getEssi0().getSR().test(Essi::SSISR_RDF);
+			case RequestSource::Essi1TransmitData:			return _p.getEssi1().getSR().test(Essi::SSISR_TDE);
+			case RequestSource::Essi1ReceiveData:			return _p.getEssi1().getSR().test(Essi::SSISR_RDF);
+			case RequestSource::Hi08ReceiveDataFull:		return _p.getHI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HRDF);
+			case RequestSource::Hi08TransmitDataEmpty:		return _p.getHI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HTDE);
+			default:
+				assert("Unsupported request source for 56303");
+				return false;
+			}
+		}
+
+		bool checkTrigger(Peripherals56362& _p, const RequestSource _src)
+		{
+			return false;
+			switch (_src)
+			{
+			case RequestSource::EsaiReceiveData:			return _p.getEsai().getSR().test(Esai::M_RDF);
+			case RequestSource::EsaiTransmitData:			return _p.getEsai().getSR().test(Esai::M_TDE);
+			case RequestSource::HostReceiveData:			return _p.getHDI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HRDF);
+			case RequestSource::HostTransmitData:			return _p.getHDI08().readStatusRegister() & (1 << dsp56k::HDI08::HSR_HTDE);
+			default:
+				assert("Unsupported request source for 56362");
+				return false;
+			}
+		}
+	}
+
 	DmaChannel::DmaChannel(Dma& _dma, IPeripherals& _peripherals, const TWord _index): m_index(_index), m_dma(_dma), m_peripherals(_peripherals)
 	{
 	}
@@ -43,6 +97,9 @@ namespace dsp56k
 
 	void DmaChannel::setDCR(const TWord _controlRegister)
 	{
+		if(m_dcr == _controlRegister)
+			return;
+
 		m_dma.removeTriggerTarget(this);
 
 		m_dcr = _controlRegister;
@@ -55,9 +112,22 @@ namespace dsp56k
 		if(bitvalue(m_dcr, D3d))
 		{
 			extractDCOHML(m_dcoh, m_dcom, m_dcol);
+
 			m_dcohInit = m_dcoh;
 			m_dcomInit = m_dcom;
 			m_dcolInit = m_dcol;
+		}
+		else
+		{
+			m_dcohInit = m_dco >> 12;
+			m_dcolInit = m_dco & 0xff;
+
+			m_dcoh = m_dcohInit;
+			m_dcol = m_dcolInit;
+
+			// we use dcoM as backup storage for the full DCO reg for all non-3D transfer modes
+			m_dcomInit = m_dco;
+			m_dcom = m_dcomInit;
 		}
 
 		if (!isRequestTrigger())
@@ -72,10 +142,12 @@ namespace dsp56k
 			else
 			{
 				// "When the needed resources are available, each word transfer performed by the DMA takes at least two core clock cycles"
-				m_pendingTransfer = std::max(1, static_cast<int32_t>((m_dco + 1) << 1)); 
+				m_pendingTransfer = std::max(1, static_cast<int32_t>((m_dco + 1) << 1));
 //				m_pendingTransfer = 1;
+				m_peripherals.setDelayCycles(m_pendingTransfer);
 				m_lastClock = m_peripherals.getDSP().getInstructionCounter();
 			}
+			return;
 		}
 		else
 		{
@@ -87,19 +159,34 @@ namespace dsp56k
 			const auto srcSpace = getSourceSpace();
 			const auto dstSpace = getDestinationSpace();
 
-			if(tm == TransferMode::WordTriggerRequest && reqSrc == RequestSource::EsaiTransmitData)
+			const auto isSupportedTransferMode = tm == TransferMode::WordTriggerRequest || tm == TransferMode::WordTriggerRequestClearDE || tm == TransferMode::LineTriggerRequestClearDE;
+
+			if(isSupportedTransferMode)
 			{
-				m_dma.addTriggerTarget(this);
-			}
-			else if(tm == TransferMode::WordTriggerRequest && reqSrc == RequestSource::EsaiReceiveData)
-			{
-				m_dma.addTriggerTarget(this);
+				if(auto* p303 = dynamic_cast<Peripherals56303*>(&m_peripherals))
+				{
+					m_dma.addTriggerTarget(this);
+					if(checkTrigger(*p303, reqSrc))
+						triggerByRequest();
+				}
+				else if(auto* p362 = dynamic_cast<Peripherals56362*>(&m_peripherals))
+				{
+					m_dma.addTriggerTarget(this);
+					if(checkTrigger(*p362, reqSrc))
+						triggerByRequest();
+				}
+				else
+				{
+					assert(false && "TODO unknown peripherals, not supported yet");
+				}
 			}
 			else
 			{
-				assert(false && "TODO");
+				assert(false && "TODO implement transfer mode in execTransfer()");
 			}
 		}
+
+		m_peripherals.setDelayCycles(0);
 	}
 
 	const TWord& DmaChannel::getDSR() const
@@ -122,16 +209,16 @@ namespace dsp56k
 		return m_dcr;
 	}
 
-	void DmaChannel::exec()
+	uint32_t DmaChannel::exec()
 	{
 		if constexpr (!g_delayedDmaTransfer)
-			return;
+			return IPeripherals::MaxDelayCycles;
 
 		if(m_pendingTransfer <= 0)
-			return;
+			return IPeripherals::MaxDelayCycles;
 
 		const auto clock = m_peripherals.getDSP().getInstructionCounter();
-		const auto diff = delta(clock, m_lastClock);
+		const auto diff = clock - m_lastClock;
 		m_lastClock = clock;
 
 		m_pendingTransfer -= static_cast<int32_t>(diff);
@@ -148,10 +235,15 @@ namespace dsp56k
 				m_pendingTransfer = 1;
 			}
 		}
+
+		return m_pendingTransfer;
 	}
 
 	void DmaChannel::triggerByRequest()
 	{
+		if(!bittest(m_dcr, De))
+			return;
+
 		if(execTransfer())
 			finishTransfer();
 	}
@@ -305,20 +397,56 @@ namespace dsp56k
 		}
 	}
 
-	bool DmaChannel::isPeripheralAddr(EMemArea _area, TWord _first, TWord _count)
+	void DmaChannel::memCopyToFixedDest(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const
+	{
+		TWord srcAddr = _srcAddr;
+
+		for (TWord i = 0; i < _count; ++i)
+		{
+			const TWord data = memRead(_srcArea, srcAddr);
+			memWrite(_dstArea, _dstAddr, data);
+			++srcAddr;
+		}
+	}
+
+	bool DmaChannel::dualModeIncrement(TWord& _dst, const TWord _dor)
+	{
+		if(m_dcol > 0)
+		{
+			--m_dcol;
+			++_dst;
+		}
+		else if(m_dcoh > 0)
+		{
+			_dst += _dor;
+			m_dcol = m_dcolInit;
+			--m_dcoh;
+		}
+		else
+		{
+			_dst += _dor;
+			_dst &= 0xffffff;
+			return true;
+		}
+
+		_dst &= 0xffffff;
+		return false;
+	}
+
+	bool DmaChannel::isPeripheralAddr(const EMemArea _area, const TWord _first, const TWord _count) const
 	{
 		if (_area == MemArea_P)
 			return false;
-		if (_first >= XIO_Reserved_High_First)
+		if (m_peripherals.getDSP().isPeripheralAddress(_first))
 			return true;
-		if ((_first + _count) <= XIO_Reserved_High_First)
+		if (!m_peripherals.getDSP().isPeripheralAddress(_first + _count - 1))
 			return false;
 		return true;
 	}
 
-	bool DmaChannel::isPeripheralAddr(EMemArea _area, TWord _addr)
+	bool DmaChannel::isPeripheralAddr(const EMemArea _area, const TWord _addr) const
 	{
-		return _area != MemArea_P && _addr >= XIO_Reserved_High_First;
+		return _area != MemArea_P && m_peripherals.getDSP().isPeripheralAddress(_addr);
 	}
 
 	bool DmaChannel::bridgedOverlap(EMemArea _area, TWord _first, TWord _count) const
@@ -367,7 +495,7 @@ namespace dsp56k
 	{
 		auto& dsp = m_peripherals.getDSP();
 		if (isPeripheralAddr(_area, _addr))
-			return dsp.getPeriph(_area)->read(_addr, Nop);
+			return dsp.getPeriph(_area)->read(_addr | 0xff0000, Nop);
 		return dsp.memory().get(_area, _addr);
 	}
 
@@ -375,7 +503,7 @@ namespace dsp56k
 	{
 		auto& dsp = m_peripherals.getDSP();
 		if (isPeripheralAddr(_area, _addr))
-			dsp.getPeriph(_area)->write(_addr, _value);
+			dsp.getPeriph(_area)->write(_addr | 0xff0000, _value);
 		else if (_area == MemArea_P)
 			dsp.memWriteP(_addr, _value);
 		else
@@ -467,20 +595,85 @@ namespace dsp56k
 
 			return blockFinished;
 		}
-		else
+
+		const auto agmS = getSourceAddressGenMode();
+		const auto agmD = getDestinationAddressGenMode();
+
+		if (agmS == AddressGenMode::SingleCounterApostInc && agmD == AddressGenMode::SingleCounterApostInc)
 		{
-			const auto agmS = getSourceAddressGenMode();
-			const auto agmD = getDestinationAddressGenMode();
-
-			if (agmS == AddressGenMode::SingleCounterApostInc && agmD == AddressGenMode::SingleCounterApostInc)
-				memCopy(areaD, m_ddr, areaS, m_dsr, m_dco + 1);
-			else if (agmS == AddressGenMode::SingleCounterAnoUpdate && agmD == AddressGenMode::SingleCounterApostInc)
-				memFill(areaD, m_ddr, areaS, m_dsr, m_dco + 1);
-			else
-				assert(false && "counter modes not supported yet");
-
+			assert(!isRequestTrigger() && "not supported yet, needs to be transfer one word at a time");
+			memCopy(areaD, m_ddr, areaS, m_dsr, m_dco + 1);
+			m_dsr += m_dco + 1;
+			m_ddr += m_dco + 1;
 			return true;
 		}
+
+		if (agmS == AddressGenMode::SingleCounterAnoUpdate && agmD == AddressGenMode::SingleCounterApostInc)
+		{
+			// can be used to continously read a peripheral and write to a memory region
+			if(isRequestTrigger())
+			{
+				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
+				++m_ddr;
+				if(m_dco)
+				{
+					--m_dco;
+					return false;
+				}
+
+				m_dco = m_dcomInit;
+				return true;
+			}
+
+			memFill(areaD, m_ddr, areaS, m_dsr, m_dco + 1);
+			m_ddr += m_dco + 1;
+			return true;
+		}
+
+		if(agmS == AddressGenMode::SingleCounterApostInc && agmD == AddressGenMode::SingleCounterAnoUpdate)
+		{
+			// can be used to continously feed a peripheral from a memory region
+			if(isRequestTrigger())
+			{
+				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
+				++m_dsr;
+				if(m_dco)
+				{
+					--m_dco;
+					return false;
+				}
+
+				m_dco = m_dcomInit;
+				return true;
+			}
+
+			memCopyToFixedDest(areaD, m_ddr, areaS, m_dsr, m_dco + 1);
+			m_dsr += m_dco + 1;
+			return true;
+		}
+
+		if(agmS == AddressGenMode::SingleCounterApostInc && agmD == AddressGenMode::DualCounterDOR1)
+		{
+			// 2D mode, can be either line or word
+
+			const auto tm = getTransferMode();
+			const auto isLineTransfer = tm == TransferMode::LineTriggerRequestClearDE;
+
+			do
+			{
+				memWrite(areaD, m_ddr, memRead(areaS, m_dsr));
+				++m_dsr;
+
+				if(dualModeIncrement(m_ddr, m_dma.getDOR(1)))
+					return true;
+			}
+			while(isLineTransfer && m_dcol != m_dcolInit);
+
+			return false;
+		}
+
+		assert(false && "DMA transfer mode not supported yet");
+		return true;
 	}
 
 	void DmaChannel::finishTransfer()
@@ -530,17 +723,20 @@ namespace dsp56k
 		return m_dor[_index];
 	}
 
-	void Dma::exec()
+	uint32_t Dma::exec()
 	{
 		if((m_dstr & (1 << Dact)) == 0)
-			return;
+			return IPeripherals::MaxDelayCycles;
 
-		m_channels[0].exec();
-		m_channels[1].exec();
-		m_channels[2].exec();
-		m_channels[3].exec();
-		m_channels[4].exec();
-		m_channels[5].exec();
+		auto delay = m_channels[0].exec();
+
+		delay = std::min(delay, m_channels[1].exec());
+		delay = std::min(delay, m_channels[2].exec());
+		delay = std::min(delay, m_channels[3].exec());
+		delay = std::min(delay, m_channels[4].exec());
+		delay = std::min(delay, m_channels[5].exec());
+
+		return delay;
 	}
 
 	void Dma::setActiveChannel(const TWord _channel)
@@ -556,7 +752,13 @@ namespace dsp56k
 		m_dstr &= ~(1 << Dact);
 	}
 
-	bool Dma::trigger(DmaChannel::RequestSource _source)
+	bool Dma::hasTrigger(DmaChannel::RequestSource _source) const
+	{
+		const auto& channels = m_requestTargets[static_cast<uint32_t>(_source)];
+		return !channels.empty();
+	}
+
+	bool Dma::trigger(DmaChannel::RequestSource _source) const
 	{
 		const auto& channels = m_requestTargets[static_cast<uint32_t>(_source)];
 

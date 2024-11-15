@@ -6,8 +6,8 @@
 #include "utils.h"
 #include "instructioncache.h"
 #include "opcodes.h"
-#include "logging.h"
 #include "jit.h"
+#include "jittypes.h"
 
 namespace dsp56k
 {
@@ -19,8 +19,11 @@ namespace dsp56k
 	class JitOps;
 	class AotRuntime;
 	class DebuggerInterface;
+	class DSP;
 	
 	using TInstructionFunc = void (DSP::*)(TWord _op);
+	
+	template<typename Ta, typename Tb> void dspExecPeripherals(DSP* _dsp);
 
 	class DSP final
 	{
@@ -117,36 +120,36 @@ namespace dsp56k
 		//
 		Memory&							mem;
 		std::array<IPeripherals*, 2>	perif;
-		uint32_t						m_peripheralCounter = 0;
 		
 		TWord							pcCurrentInstruction = 0;
 		TWord							m_opWordB = 0;
 		uint32_t						m_currentOpLen = 0;
 
+		TInterruptFunc					m_execPeripheralsFunc;
+
 		// these members are accessed via JIT asm code, keep them tightly together
 		Jit								m_jit;
 		SRegs							reg;							// this is the base pointer that is used to access all surrounding members
-		uint32_t						m_instructions = 0;
+		uint64_t						m_instructions = 0;
+		uint64_t						m_cycles = 0;
 		ProcessingMode					m_processingMode = Default;
 		TInterruptFunc					m_interruptFunc;
 
+		const TJitFunc*					m_jitEntries = nullptr;
 		CCRCache						ccrCache;
-
-		std::mutex						m_mutexInsertPendingInterrupt;
-
-		struct PendingInterrupt
-		{
-			TWord vba = 0xffffffff;
-			std::function<void()> func;
-		};
 
 #ifdef HAVE_ARM64
         // Our lock free ring buffer does not work properly on aarch4 :-O
         // https://www.arangodb.com/2021/02/cpp-memory-model-migrating-from-x86-to-arm/
-		RingBuffer<PendingInterrupt, 1024, true>	m_pendingInterrupts;	// TODO: array is way too large
+		RingBuffer<TWord, 1024, true>				m_pendingInterrupts;	// TODO: array is way too large
+		RingBuffer<TWord, 32, true>					m_pendingExternalInterrupts;
 #else
-        RingBuffer<PendingInterrupt, 1024, false>   m_pendingInterrupts;    // TODO: array is way too large
+        RingBuffer<TWord, 1024, false>				m_pendingInterrupts;    // TODO: array is way too large
+		RingBuffer<TWord, 32, false>				m_pendingExternalInterrupts;
 #endif
+
+		std::vector<std::function<void()>>			m_customInterrupts;
+
 		Opcodes							m_opcodes;
 
 		struct OpcodeCacheEntry
@@ -205,15 +208,40 @@ namespace dsp56k
 		TReg24	getPC							() const									{ return reg.pc; }
 
 		void 	exec							();
-		void	execPeriph						();
-		void	tryExecInterrupts				();
-		void	execInterrupts					();
-		void	execInterrupt					(uint32_t _interruptVectorAddress);
-		void	execDefaultPreventInterrupt		();
-		void	execNoPendingInterrupts			();
-		void	nop								() {}
 
-		uint32_t	getRemainingPeripheralsCycles() const	{ return m_peripheralCounter - m_instructions; }
+		template<typename Ta, typename Tb> void execPeriph() noexcept
+		{
+			// this is a super hot function and for some reason the compiler insists of doing all the stack frame work
+			// before this early out. To fix this, we move the remaining code into a helper func below, marked as noinline
+			if (ASMJIT_LIKELY(perif[0]->getTargetClock() > m_instructions))
+				return;
+
+			execPeripherals<Ta, Tb>();
+		}
+
+		template<typename Ta, typename Tb> ASMJIT_NOINLINE void execPeripherals()
+		{
+			// we do not have any Y peripherals that need processing atm
+			const auto delayA = static_cast<Ta*>(perif[0])->exec();
+//			const auto delayB = static_cast<Tb*>(perif[1])->exec();
+
+			perif[0]->resetDelayCycles(delayA);
+//			perif[1]->resetDelayCycles(delayB);
+
+			processExternalInterrupts();
+		}
+
+		uint32_t getRemainingPeripheralsCycles() const
+		{
+			const auto targetCycles = perif[0]->getTargetClock();
+			if(m_instructions > targetCycles)
+				return 0;
+			return static_cast<uint32_t>(targetCycles - m_instructions);
+		}
+
+		void	execInterrupts					();
+		void	execInterrupt					(uint32_t vba);
+		void	execDefaultPreventInterrupt		();
 
 		bool	readReg							( EReg _reg, TReg8& _res ) const;
 		bool	readReg							( EReg _reg, TReg48& _res ) const;
@@ -227,7 +255,8 @@ namespace dsp56k
 
 		bool	readRegToInt					( EReg _reg, int64_t& _dst ) const;
 
-		const uint32_t&	getInstructionCounter		() const									{ return m_instructions; }
+		const auto&		getInstructionCounter		() const	{ return m_instructions; }
+		const auto&		getCycles					() const	{ return m_cycles; }
 
 		const char*			getASM						(TWord wordA, TWord wordB);
 		const std::string&	getASM						() const							{ return m_asm; }
@@ -240,20 +269,26 @@ namespace dsp56k
 
 		void			logSC							( const char* _func ) const;
 
-		bool			save							( FILE* _file ) const;
-		bool			load							( FILE* _file );
-
+		TWord			registerInterruptFunc			(std::function<void()>&& _func);
 		bool			injectInterrupt					(uint32_t _interruptVectorAddress);
-		bool			injectInterrupt					(std::function<void()>&& func);
 		bool			injectInterruptImmediate		(uint32_t _interruptVectorAddress);
 		bool			isInterruptMasked				(const TWord _vba) const;
 
+		void			injectExternalInterrupt			(const TWord _vba);
+		void			processExternalInterrupts		();
+
 		bool			hasPendingInterrupts			() const
 		{
+			if(m_processingMode != Default)
+				return true;
+
+			if(!m_pendingExternalInterrupts.empty())
+				return true;
+
 			if(!m_pendingInterrupts.empty())
 				return true;
 
-			return m_processingMode != Default;
+			return false;
 		}
 
 		void			clearOpcodeCache				();
@@ -272,7 +307,7 @@ namespace dsp56k
 		const Opcodes&	opcodes							() const									{ return m_opcodes; }
 		Disassembler&	disassembler					()											{ return m_disasm; }
 
-		void			setPeriph						(const size_t _index, IPeripherals* _periph)	{ perif[_index] = _periph; _periph->setDSP(this); }
+		void			setPeriph						(const size_t _index, IPeripherals* _periph);
 		const IPeripherals*	getPeriph					(const size_t _index) const						{ return perif[_index]; }
 		IPeripherals*	getPeriph						(const size_t _index)							{ return perif[_index]; }
 		IPeripherals*	getPeriph						(const EMemArea _area)
@@ -288,11 +323,30 @@ namespace dsp56k
 		ProcessingMode getProcessingMode() const		{return m_processingMode;}
 
 		Jit&			getJit							() { return m_jit; }
+		const Jit&		getJit							() const { return m_jit; }
+
+		void			setJitEntries					(const TJitFunc* _funcs)			{ m_jitEntries = _funcs; }
+		const auto&		getJitEntries					() const			{ return m_jitEntries; }
+
+		const auto&		getInterruptFunc				() const			{ return m_interruptFunc; }
 
 		void			terminate						();
 
 		void				setDebugger						(DebuggerInterface* _debugger);
 		DebuggerInterface*	getDebugger						()								{ return m_debugger; }
+
+		bool			isPeripheralAddress(const TWord _addr) const
+		{
+			if(sr_test(SR_SC))
+				return _addr >= XIO_Reserved_High_First_16;
+			return _addr >= XIO_Reserved_High_First;
+		}
+
+		void fastForward(const TWord _instructions, const TWord _cycles)
+		{
+			m_instructions += _instructions;
+			m_cycles += _cycles;
+		}
 
 	private:
 
@@ -990,7 +1044,7 @@ namespace dsp56k
 		void op_Trapcc(TWord op);
 		void op_Tst(TWord op);
 		void op_Vsl(TWord op);
-		void op_Wait(TWord op);
+		void op_Wait(TWord _op);
 		void op_ResolveCache(TWord op);
 		void op_Parallel(TWord op);
 
@@ -1003,67 +1057,67 @@ namespace dsp56k
 		template <Instruction I> int checkCondition(TWord op) const;
 
 		// Effective Address
-		template<Instruction Inst, typename std::enable_if<hasFields<Inst,Field_MMM, Field_RRR>()>::type* = nullptr>
+		template<Instruction Inst, std::enable_if_t<hasFields<Inst,Field_MMM, Field_RRR>()>* = nullptr>
 		TWord effectiveAddress(TWord op);
 
-		template<Instruction Inst, typename std::enable_if<hasField<Inst,Field_aaaaaaaaaaaa>()>::type* = nullptr>
+		template<Instruction Inst, std::enable_if_t<hasFieldT<Inst,Field_aaaaaaaaaaaa>()>* = nullptr>
 		TWord effectiveAddress(TWord op) const;
 
-		template<Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_a, Field_RRR>() && hasField<Inst,Field_aaaaaa>()>::type* = nullptr>
+		template<Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_a, Field_RRR>() && hasFieldT<Inst,Field_aaaaaa>()>* = nullptr>
 		TWord effectiveAddress(TWord op) const;
 
-		template<Instruction Inst, typename std::enable_if<hasFields<Inst,Field_aaaaaa, Field_a, Field_RRR>()>::type* = nullptr>
+		template<Instruction Inst, std::enable_if_t<has3Fields<Inst,Field_aaaaaa, Field_a, Field_RRR>()>* = nullptr>
 		TWord effectiveAddress(TWord op) const;
 
 		// Relative Address Offset
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_aaaa, Field_aaaaa>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaa, Field_aaaaa>()>* = nullptr>
 		int relativeAddressOffset(TWord op) const;
-		template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_RRR>()>::type* = nullptr> 
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_RRR>()>* = nullptr> 
 		int relativeAddressOffset(TWord op) const;
 
 		// Memory Read
-		template <Instruction Inst, typename std::enable_if<!hasField<Inst,Field_s>() && hasFields<Inst, Field_MMM, Field_RRR, Field_S>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<!hasFieldT<Inst,Field_s>() && has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>* = nullptr>
 		TWord readMem(TWord op);
 
-		template <Instruction Inst, typename std::enable_if<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
 		TWord readMem(TWord op, EMemArea area);
 
-		template <Instruction Inst, TWord MMM, typename std::enable_if<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>::type* = nullptr>
+		template <Instruction Inst, TWord MMM, std::enable_if_t<!hasFields<Inst,Field_s, Field_S>() && hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
 		TWord readMem(TWord op, EMemArea area);
 
-		template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_aaaaaaaaaaaa>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaaaaaaaa>()>* = nullptr>
 		TWord readMem(TWord op, EMemArea area) const;
 
-		template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_aaaaaa>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaa>()>* = nullptr>
 		TWord readMem(TWord op, EMemArea area) const;
 
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_aaaaaa, Field_S>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaaaa, Field_S>()>* = nullptr>
 		TWord readMem(TWord op) const;
 
-		template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>::type* = nullptr> TWord readMem(TWord op) const;
-		template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>::type* = nullptr> TWord readMem(TWord op) const;
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>* = nullptr> TWord readMem(TWord op) const;
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>* = nullptr> TWord readMem(TWord op) const;
 
 		// Memory Write
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR, Field_S>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<has3Fields<Inst, Field_MMM, Field_RRR, Field_S>()>* = nullptr>
 		void writeMem(TWord op, TWord value);
 
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
 		void writeMem(TWord op, EMemArea area, TWord value);
 
-		template <Instruction Inst, TWord MMM, typename std::enable_if<hasFields<Inst, Field_MMM, Field_RRR>()>::type* = nullptr>
+		template <Instruction Inst, TWord MMM, std::enable_if_t<hasFields<Inst, Field_MMM, Field_RRR>()>* = nullptr>
 		void writeMem(TWord op, EMemArea area, TWord value);
 
-		template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_aaaaaaaaaaaa>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaaaaaaaa>()>* = nullptr>
 		void writeMem(TWord op, EMemArea area, TWord value);
 
-		template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_aaaaaa>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaa>()>* = nullptr>
 		void writeMem(TWord op, EMemArea area, TWord value);
 
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_aaaaaa, Field_S>()>::type* = nullptr>
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaaaa, Field_S>()>* = nullptr>
 		void writeMem(TWord op, TWord value);
 
-		template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>::type* = nullptr> void writeMem(TWord op, TWord value);
-		template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>::type* = nullptr> void writeMem(TWord op, TWord value);
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_qqqqqq, Field_S>()>* = nullptr> void writeMem(TWord op, TWord value);
+		template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_MMM, Field_RRR>() && hasFields<Inst, Field_pppppp, Field_S>()>* = nullptr> void writeMem(TWord op, TWord value);
 
 		// bit manipulation
 		template <Instruction Inst> bool bitTest(TWord op, TWord toBeTested)
@@ -1071,7 +1125,7 @@ namespace dsp56k
 			const auto bit = getBit<Inst>(op);
 			return dsp56k::bittest<TWord>(toBeTested, bit);
 		}
-		template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_bbbbb, Field_S>()>::type* = nullptr> bool bitTestMemory(TWord op);
+		template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_bbbbb, Field_S>()>* = nullptr> bool bitTestMemory(TWord op);
 
 		// extension word access
 		template<Instruction Inst> TWord absAddressExt()

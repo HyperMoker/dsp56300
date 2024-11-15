@@ -14,7 +14,7 @@ namespace dsp56k
 #else
 		if(_dst != _src)
 		{
-			if(m_asm.hasBMI2())
+			if(JitEmitter::hasBMI2())
 			{
 				m_asm.rorx(_dst, _src, asmjit::Imm(64-8));
 				m_asm.sar(_dst, asmjit::Imm(8));
@@ -38,15 +38,22 @@ namespace dsp56k
 #endif
 	}
 
-	void JitOps::signextend48to56(const JitReg64& _reg) const
+	void JitOps::signextend48to56(const JitReg64& _dst, const JitReg64& _src) const
 	{
 #ifdef HAVE_ARM64
-		m_asm.sbfx(_reg, _reg, asmjit::Imm(0), asmjit::Imm(48));
-		m_asm.ubfx(_reg, _reg, asmjit::Imm(0), asmjit::Imm(56));
+		m_asm.sbfx(_dst, _src, asmjit::Imm(0), asmjit::Imm(48));
+		m_asm.ubfx(_dst, _dst, asmjit::Imm(0), asmjit::Imm(56));
 #else
-		m_asm.sal(_reg, asmjit::Imm(16));
-		m_asm.sar(_reg, asmjit::Imm(8));	// we need to work around the fact that there is no AND with 64 bit immediate operand
-		m_asm.shr(_reg, asmjit::Imm(8));
+		if(_dst == _src)
+		{
+			m_asm.sal(_dst, asmjit::Imm(16));
+		}
+		else
+		{
+			m_asm.rol(_dst, _src, 16);
+		}
+		m_asm.sar(_dst, asmjit::Imm(8));	// we need to work around the fact that there is no AND with 64 bit immediate operand
+		m_asm.shr(_dst, asmjit::Imm(8));
 #endif
 	}
 
@@ -56,30 +63,35 @@ namespace dsp56k
 		m_asm.sbfx(_reg, _reg, asmjit::Imm(0), asmjit::Imm(24));
 		m_asm.ubfx(_reg, _reg, asmjit::Imm(0), asmjit::Imm(56));
 #else
-		m_asm.sal(_reg, asmjit::Imm(40));
-		m_asm.sar(_reg, asmjit::Imm(32));	// we need to work around the fact that there is no AND with 64 bit immediate operand
+		m_asm.sal(r32(_reg), asmjit::Imm(8));
+		m_asm.movsxd(r64(_reg), r32(_reg));
 		m_asm.shr(_reg, asmjit::Imm(8));
+#endif
+	}
+
+	void JitOps::signextend24to64(JitEmitter& _a, const JitReg64& _dst, const JitReg64& _src)
+	{
+#ifdef HAVE_ARM64
+		_a.sbfx(_dst, _src, asmjit::Imm(0), asmjit::Imm(24));
+#else
+		if (_dst != _src)
+		{
+			if (JitEmitter::hasBMI2())
+			{
+				_a.rorx(_dst, _src, asmjit::Imm(64 - 40));
+				_a.sar(_dst, asmjit::Imm(40));
+				return;
+			}
+			_a.mov(r32(_dst), r32(_src));
+		}
+		_a.sal(_dst, asmjit::Imm(40));
+		_a.sar(_dst, asmjit::Imm(40));
 #endif
 	}
 
 	void JitOps::signextend24to64(const JitReg64& _dst, const JitReg64& _src) const
 	{
-#ifdef HAVE_ARM64
-		m_asm.sbfx(_dst, _src, asmjit::Imm(0), asmjit::Imm(24));
-#else
-		if(_dst != _src)
-		{
-			if(m_asm.hasBMI2())
-			{
-				m_asm.rorx(_dst, _src, asmjit::Imm(64-40));
-				m_asm.sar(_dst, asmjit::Imm(40));
-				return;
-			}
-			m_asm.mov(r32(_dst), r32(_src));
-		}
-		m_asm.sal(_dst, asmjit::Imm(40));
-		m_asm.sar(_dst, asmjit::Imm(40));
-#endif
+		signextend24to64(m_asm, _dst, _src);
 	}
 
 	void JitOps::signextend24To32(const JitReg32& _reg) const
@@ -109,24 +121,18 @@ namespace dsp56k
 		const auto t = r32(temp);
 
 		m_asm.mov(t, x);
-		m_asm.and_(t, asmjit::Imm(0xaaaaaaaa));
-		m_asm.and_(x, asmjit::Imm(0x55555555));
-		m_asm.shr(t, asmjit::Imm(1));
-		m_asm.shl(x, asmjit::Imm(1));
+		m_asm.and_(t, asmjit::Imm(0xaaaaaaaa));	m_asm.and_(x, asmjit::Imm(0x55555555));
+		m_asm.shr(t, asmjit::Imm(1));			m_asm.shl(x, asmjit::Imm(1));
 		m_asm.or_(x, t);
 
 		m_asm.mov(t, x);
-		m_asm.and_(t, asmjit::Imm(0xcccccccc));
-		m_asm.and_(x, asmjit::Imm(0x33333333));
-		m_asm.shr(t, asmjit::Imm(2));
-		m_asm.shl(x, asmjit::Imm(2));
+		m_asm.and_(t, asmjit::Imm(0xcccccccc));	m_asm.and_(x, asmjit::Imm(0x33333333));
+		m_asm.shr(t, asmjit::Imm(2));			m_asm.shl(x, asmjit::Imm(2));
 		m_asm.or_(x, t);
 
 		m_asm.mov(t, x);
-		m_asm.and_(t, asmjit::Imm(0xf0f0f0f0));
-		m_asm.and_(x, asmjit::Imm(0x0f0f0f0f));
-		m_asm.shr(t, asmjit::Imm(4));
-		m_asm.shl(x, asmjit::Imm(4));
+		m_asm.and_(t, asmjit::Imm(0xf0f0f0f0));	m_asm.and_(x, asmjit::Imm(0x0f0f0f0f));
+		m_asm.shr(t, asmjit::Imm(4));			m_asm.shl(x, asmjit::Imm(4));
 		m_asm.or_(x, t);
 
 		m_asm.bswap(x);
@@ -134,25 +140,13 @@ namespace dsp56k
 #endif
 	}
 
-	void JitOps::signed24To56(const JitReg64& _r) const
-	{
-#ifdef HAVE_ARM64
-		m_asm.sbfx(r32(_r), r32(_r), asmjit::Imm(0), asmjit::Imm(24));
-		m_asm.lsl(r32(_r), r32(_r), asmjit::Imm(24));
-#else
-		m_asm.shl(_r, asmjit::Imm(40));
-		m_asm.sar(_r, asmjit::Imm(8));		// we need to work around the fact that there is no AND with 64 bit immediate operand
-		m_asm.shr(_r, asmjit::Imm(8));
-#endif
-	}
-
 	void JitOps::pushPCSR()
 	{
 		DspValue pc(m_block);
 
-		if (m_fastInterrupt)
+		if (m_fastInterruptMode != FastInterruptMode::None)
 		{
-			pc = m_block.dspRegPool().read(JitDspRegPool::DspPC);
+			pc = m_block.dspRegPool().read(PoolReg::DspPC);
 		}
 		else
 		{
@@ -166,20 +160,19 @@ namespace dsp56k
 	void JitOps::popPCSR()
 	{
 		{
-			DspValue sr(m_block);
+			DspValue sr(m_block, DspSR, false, true);
 			getSSL(sr);
-			setSR(sr);
+			setSR(sr);	// still needed to call this to mark CCR bits as non-dirty
 		}
 		popPC();
 	}
 	void JitOps::popPC()
 	{
-		DspValue pc(m_block);
+		DspValue pc(m_block, PoolReg::DspPC, false, true);
 		getSSH(pc);
-		m_dspRegs.setPC(pc);
 	}
 
-	void JitOps::setDspProcessingMode(uint32_t _mode)
+	void JitOps::setDspProcessingMode(const uint32_t _mode) const
 	{
 		const DspValue r(m_block, _mode, DspValue::Immediate24);
 
@@ -193,15 +186,23 @@ namespace dsp56k
 		if(_mode == DSP::DefaultPreventInterrupt)
 		{
 			const auto* ptr = asmjit::func_as_ptr(&dspExecDefaultPreventInterrupt);
-			m_block.mem().mov(&m_block.dsp().m_interruptFunc, reinterpret_cast<uint64_t>(ptr));
+			m_block.mem().mov(reinterpret_cast<uint64_t*>(&m_block.dsp().m_interruptFunc), reinterpret_cast<uint64_t>(ptr));
 		}
 		else if(_mode == DSP::LongInterrupt)
 		{
 			const auto* ptr = asmjit::func_as_ptr(&dspExecNop);
-			m_block.mem().mov(&m_block.dsp().m_interruptFunc, reinterpret_cast<uint64_t>(ptr));
+			m_block.mem().mov(reinterpret_cast<uint64_t*>(&m_block.dsp().m_interruptFunc), reinterpret_cast<uint64_t>(ptr));
 		}
 		else
 			assert(false && "support missing");
+	}
+
+	void JitOps::getDspProcessingMode(const JitRegGP& _dst) const
+	{
+		if constexpr (sizeof(m_block.dsp().m_processingMode) == sizeof(uint32_t))
+			m_block.mem().mov(r64(_dst), reinterpret_cast<uint32_t&>(m_block.dsp().m_processingMode));
+		else if constexpr (sizeof(m_block.dsp().m_processingMode) == sizeof(uint64_t))
+			m_block.mem().mov(r32(_dst), reinterpret_cast<uint64_t&>(m_block.dsp().m_processingMode));
 	}
 
 	TWord JitOps::getOpWordB()
@@ -214,6 +215,46 @@ namespace dsp56k
 	void JitOps::getOpWordB(DspValue& _dst)
 	{
 		_dst.set(getOpWordB(), DspValue::Immediate24);
+	}
+
+	void JitOps::getXY0(DspValue& _dst, const uint32_t _aluIndex, bool _signextend) const
+	{
+		if (!_dst.isRegValid())
+			_dst.temp(DspValue::Temp24);
+		else
+			assert(_dst.getBitCount() == 24);
+
+		const auto src = m_block.dspRegPool().get(_aluIndex ? PoolReg::DspY0 : PoolReg::DspX0, true, false);
+
+		if (_signextend)
+			signextend24to64(r64(_dst), r64(src));
+		else
+			m_asm.mov(r32(_dst), r32(src));
+	}
+
+	void JitOps::getXY1(DspValue& _dst, const uint32_t _aluIndex, bool _signextend) const
+	{
+		if (!_dst.isRegValid())
+			_dst.temp(DspValue::Temp24);
+		else
+			assert(_dst.getBitCount() == 24);
+
+		const auto src = m_block.dspRegPool().get(_aluIndex ? PoolReg::DspY1 : PoolReg::DspX1, true, false);
+
+		if (_signextend)
+			signextend24to64(r64(_dst), r64(src));
+		else
+			m_asm.mov(r32(_dst), r32(src));
+	}
+
+	void JitOps::setXY0(const uint32_t _xy, const DspValue& _src)
+	{
+		m_block.dspRegPool().setXY0(_xy, _src);
+	}
+
+	void JitOps::setXY1(const uint32_t _xy, const DspValue& _src)
+	{
+		m_block.dspRegPool().setXY1(_xy, _src);
 	}
 
 	void JitOps::getMR(const JitReg64& _dst) const
@@ -317,7 +358,8 @@ namespace dsp56k
 
 	void JitOps::getSSH(DspValue& _dst) const
 	{
-		_dst.temp(DspValue::Temp24);
+		if(!_dst.isRegValid())
+			_dst.temp(DspValue::Temp24);
 		m_dspRegs.getSS(r64(_dst.get()));
 		m_asm.shr(r64(_dst.get()), asmjit::Imm(24));
 //		m_asm.and_(r32(_dst.get()), asmjit::Imm(0x00ffffff));
@@ -326,7 +368,8 @@ namespace dsp56k
 
 	void JitOps::getSSL(DspValue& _dst) const
 	{
-		_dst.temp(DspValue::Temp24);
+		if(!_dst.isRegValid())
+			_dst.temp(DspValue::Temp24);
 		m_dspRegs.getSS(r64(_dst.get()));
 		m_asm.and_(r64(_dst.get()), 0x00ffffff);
 	}
@@ -344,24 +387,25 @@ namespace dsp56k
 		_src.convertTo56(r.get());
 	}
 
-	void JitOps::callDSPFunc(void(*_func)(DSP*, TWord)) const
-	{
-		const FuncArg r0(m_block, 0);
-		m_block.asm_().mov(r0, asmjit::Imm(&m_block.dsp()));
-		m_block.stack().call(asmjit::func_as_ptr(_func));
-	}
-
 	void JitOps::callDSPFunc(void(*_func)(DSP*, TWord), const TWord _arg) const
 	{
+		const FuncArg r0(m_block, 0);
 		const FuncArg r1(m_block, 1);
+
+		m_block.mem().makeDspPtr(r0);
 		m_block.asm_().mov(r32(r1), asmjit::Imm(_arg));
-		callDSPFunc(_func);
+
+		m_block.stack().call(asmjit::func_as_ptr(_func));
 	}
 
 	void JitOps::callDSPFunc(void(*_func)(DSP*, TWord), const JitRegGP& _arg) const
 	{
+		const FuncArg r0(m_block, 0);
 		const FuncArg r1(m_block, 1);
+
+		m_block.mem().makeDspPtr(r0);
 		m_block.asm_().mov(r1, _arg);
-		callDSPFunc(_func);
+
+		m_block.stack().call(asmjit::func_as_ptr(_func));
 	}
 }

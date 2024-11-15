@@ -15,7 +15,7 @@ namespace dsp56k
 
 		// not sure if this can happen, iirc I've seen this once. Handle it
 		if(eaType == Immediate)
-			eaType = m_opWordB >= XIO_Reserved_High_First ? Peripherals : Memory;
+			eaType = isPeriphAddress(m_opWordB) ? Peripherals : Memory;
 
 		DspValue regMem(m_block);
 
@@ -57,11 +57,9 @@ namespace dsp56k
 		const auto area = getFieldValueMemArea<Inst>(op);
 		DspValue regMem(m_block);
 		regMem.temp(DspValue::Memory);
-		Jitmem::ScratchPMem scratch(m_block);
-		const auto p = m_block.mem().getMemAreaPtr(scratch, area, addr);
-		m_block.mem().readDspMemory(regMem, p);
+		auto mr = m_block.mem().readDspMemory(regMem, area, addr);
 		(this->*_bitmodFunc)(regMem, getBit<Inst>(op));
-		m_block.mem().writeDspMemory(p, regMem);
+		m_block.mem().writeDspMemory(area, addr, regMem, std::move(mr));
 	}
 
 	template<Instruction Inst> void JitOps::bitmod_ppqq(TWord op, void( JitOps::*_bitmodFunc)(const DspValue&, TWord))
@@ -77,10 +75,29 @@ namespace dsp56k
 		const auto bit		= getBit<Inst>(op);
 		const auto dddddd	= getFieldValue<Inst,Field_DDDDDD>(op);
 
-		DspValue d(m_block);
-		decode_dddddd_read(d, dddddd);
-		(this->*_bitmodFunc)(d, getBit<Inst>(op));
-		decode_dddddd_write(dddddd, d);
+		// workaround for an undocumented DSP feature, a bug in a code we've seen. It uses
+		// bclr #22,b
+		// This is not supposed to work according to the documentation, but it does.
+		// The DSP transfers the alu to a 24 bit reg, modifies, then writes it back
+		// That is why we prevent to use a reference to the ALU directly here
+		if(dddddd == 0x0e || dddddd == 0x0f)
+		{
+			DspValue d(m_block);
+			decode_dddddd_read(d, dddddd);
+			(this->*_bitmodFunc)(d, getBit<Inst>(op));
+			decode_dddddd_write(dddddd, d);
+			return;
+		}
+
+		auto dRead = decode_dddddd_ref(dddddd, true, false);
+		if(!dRead.isRegValid())
+			decode_dddddd_read(dRead, dddddd);
+
+		(this->*_bitmodFunc)(dRead, getBit<Inst>(op));
+
+		auto dWrite = decode_dddddd_ref(dddddd, true, true);
+		if(!dWrite.isType(DspValue::DspReg24))
+			decode_dddddd_write(dddddd, dRead);
 	}
 
 	template<Instruction Inst, bool Accumulate, bool Round> void JitOps::op_Mac_S(TWord op)

@@ -3,6 +3,7 @@
 #include <functional>
 #include <mutex>
 #include <memory>
+#include <string>
 #include <thread>
 
 #include "debuggerinterface.h"
@@ -20,6 +21,7 @@ namespace dsp56k
 		explicit DSPThread(DSP& _dsp, const char* _name = nullptr, std::shared_ptr<DebuggerInterface> _debugger = {});
 		~DSPThread();
 		void join();
+		void terminate();
 
 		std::mutex& mutex() { return m_mutex; }
 
@@ -36,6 +38,8 @@ namespace dsp56k
 		void detachDebugger(const DebuggerInterface* _debugger);
 
 		DSP& dsp() { return m_dsp; }
+
+		bool runThread() const { return m_runThread; }
 
 	private:
 		void threadFunc();
@@ -58,9 +62,12 @@ namespace dsp56k
 		double m_currentMips = 0.0;
 		double m_averageMips = 0.0;
 
-		char m_mipsString[64]{0};
+		double m_currentMcps = 0.0;
+		double m_averageMcps = 0.0;
+
+		char m_mipsString[128]{0};
 
 		bool m_logToDebug = true;
-		bool m_logToStdout = true;
+		bool m_logToStdout = false;
 	};
 }

@@ -4,13 +4,15 @@
 #include <list>
 #include <vector>
 
+#include "jitdspregpoolregpair.h"
 #include "types.h"
 
 #include "jithelper.h"
+#include "opcodeanalysis.h"
 
 namespace asmjit
 {
-	inline namespace _abi_1_9
+	inline namespace ASMJIT_ABI_NAMESPACE
 	{
 		class BaseNode;
 	}
@@ -24,55 +26,7 @@ namespace dsp56k
 	class JitDspRegPool
 	{
 	public:
-		enum DspReg
-		{
-			DspRegInvalid = -1,
-
-			DspR0,	DspR1,	DspR2,	DspR3,	DspR4,	DspR5,	DspR6,	DspR7,
-			DspN0,	DspN1,	DspN2,	DspN3,	DspN4,	DspN5,	DspN6,	DspN7,
-			DspM0,	DspM1,	DspM2,	DspM3,	DspM4,	DspM5,	DspM6,	DspM7,
-
-			DspA,		DspB,
-			DspAwrite,	DspBwrite,
-
-			DspX,	DspY,
-
-			DspPC,
-			DspSR,
-			DspLC,
-			DspLA,
-
-			TempA, TempB, TempC, TempD, TempE, TempF, TempG, TempH, LastTemp = TempH,
-
-			DspM0mod, DspM1mod, DspM2mod, DspM3mod, DspM4mod, DspM5mod, DspM6mod, DspM7mod,
-			DspM0mask, DspM1mask, DspM2mask, DspM3mask, DspM4mask, DspM5mask, DspM6mask, DspM7mask,
-
-			DspCount
-		};
-
-		enum class DspRegFlags : uint64_t
-		{
-			None = 0,
-
-			R0 = 1ull<<DspR0,	R1 = 1ull<<DspR1,	R2 = 1ull<<DspR2,	R3 = 1ull<<DspR3,	R4 = 1ull<<DspR4,	R5 = 1ull<<DspR5,	R6 = 1ull<<DspR6,	R7 = 1ull<<DspR7,
-			N0 = 1ull<<DspN0,	N1 = 1ull<<DspN1,	N2 = 1ull<<DspN2,	N3 = 1ull<<DspN3,	N4 = 1ull<<DspN4,	N5 = 1ull<<DspN5,	N6 = 1ull<<DspN6,	N7 = 1ull<<DspN7,
-			M0 = 1ull<<DspM0,	M1 = 1ull<<DspM1,	M2 = 1ull<<DspM2,	M3 = 1ull<<DspM3,	M4 = 1ull<<DspM4,	M5 = 1ull<<DspM5,	M6 = 1ull<<DspM6,	M7 = 1ull<<DspM7,
-
-			A = 1ull<<DspA,			B = 1ull<<DspB,
-			Awrite = 1ull<<DspAwrite,	Bwrite = 1ull<<DspBwrite,
-
-			X = 1ull<<DspX,	Y= 1ull<<DspY,
-
-			PC = 1ull<<DspPC,
-			SR = 1ull<<DspSR,
-			LC = 1ull<<DspLC,
-			LA = 1ull<<DspLA,
-
-			T0 = 1ull<<TempA, T1 = 1ull<<TempB, T2 = 1ull<<TempC, T3 = 1ull<<TempD, T4 = 1ull<<TempE, T5 = 1ull<<TempF, T6 = 1ull<<TempG, T7 = 1ull<<TempH,
-
-			M0mod  = 1ull<<DspM0mod,  M1mod  = 1ull<<DspM1mod,  M2mod  = 1ull<<DspM2mod,  M3mod  = 1ull<<DspM3mod,  M4mod  = 1ull<<DspM4mod,  M5mod  = 1ull<<DspM5mod,  M6mod  = 1ull<<DspM6mod,  M7mod  = 1ull<<DspM7mod,
-			M0mask = 1ull<<DspM0mask, M1mask = 1ull<<DspM1mask, M2mask = 1ull<<DspM2mask, M3mask = 1ull<<DspM3mask, M4mask = 1ull<<DspM4mask, M5mask = 1ull<<DspM5mask, M6mask = 1ull<<DspM6mask, M7mask = 1ull<<DspM7mask,
-		};
+		friend class JitRegPoolRegPair;
 
 		struct SpillReg
 		{
@@ -97,25 +51,31 @@ namespace dsp56k
 		JitDspRegPool(JitBlock& _block);
 		~JitDspRegPool();
 
-		JitRegGP get(DspReg _reg, bool _read, bool _write)
+		JitRegGP get(PoolReg _reg, bool _read, bool _write)
 		{
 			return get(JitRegGP(), _reg, _read, _write);
 		}
-		JitRegGP get(const JitRegGP& _dst, DspReg _reg, bool _read, bool _write);
+		JitRegGP get(const JitRegGP& _dst, PoolReg _reg, bool _read, bool _write);
 
-		DspValue read(DspReg _src) const;
-		void read(const JitRegGP& _dst, DspReg _src);
-		void write(DspReg _dst, const JitRegGP& _src);
-		void write(DspReg _dst, const DspValue& _src);
+		DspValue read(PoolReg _src) const;
+		void read(const JitRegGP& _dst, PoolReg _src);
+		void write(PoolReg _dst, const DspValue& _src);
 
-		void lock(DspReg _reg);
-		void unlock(DspReg _reg);
+		void lock(PoolReg _reg);
+		void unlock(PoolReg _reg);
+
+		std::vector<PoolReg> lock(RegisterMask _read, RegisterMask _write);
+		void unlock(const std::vector<PoolReg>& _regs);
 
 		void releaseNonLocked();
 		void releaseAll();
 		void releaseWritten();
 		void releaseLoaded();
 		void releaseByFlags(DspRegFlags _flags);
+
+		void discard(PoolReg _reg);
+
+		JitBlock& getBlock() { return m_block; }
 
 		void debugStoreAll();
 
@@ -129,16 +89,16 @@ namespace dsp56k
 
 		bool isInUse(const JitReg128& _xmm) const;
 		bool isInUse(const JitRegGP& _gp) const;
-		bool isInUse(DspReg _reg) const;
+		bool isInUse(PoolReg _reg) const;
 
-		DspReg aquireTemp();
-		void releaseTemp(DspReg _reg);
+		PoolReg aquireTemp();
+		void releaseTemp(PoolReg _reg);
 
-		bool isWritten(DspReg _reg) const		{ return flagTest(m_writtenDspRegs, _reg); }
-		bool isLocked(DspReg _reg) const		{ return flagTest(m_lockedGps, _reg); }
+		bool isWritten(PoolReg _reg) const		{ return flagTest(m_writtenDspRegs, _reg); }
+		bool isLocked(PoolReg _reg) const		{ return flagTest(m_lockedGps, _reg); }
 
-		bool move(DspReg _dst, DspReg _src);
-		bool move(const JitRegGP& _dst, DspReg _src);
+		bool move(PoolReg _dst, PoolReg _src);
+		bool move(const JitRegGP& _dst, PoolReg _src);
 
 		void setIsParallelOp(bool _isParallelOp);
 
@@ -170,7 +130,7 @@ namespace dsp56k
 		{
 			static_assert(sizeof(_reg.var) == sizeof(uint64_t) || sizeof(_reg.var) == sizeof(uint32_t) || sizeof(_reg.var) == sizeof(uint8_t), "unknown register size");
 
-			mov(makeDspPtr(_reg), _src);
+			mov<sizeof(_reg.var)>(makeDspPtr(_reg), _src);
 		}
 
 		template<typename T, unsigned int B>
@@ -190,24 +150,24 @@ namespace dsp56k
 
 		void movDspReg(const TWord& _reg, const JitRegGP& _src) const
 		{
-			mov(makeDspPtr(&_reg, sizeof(_reg)), r32(_src));
+			mov<sizeof(_reg)>(makeDspPtr(&_reg, sizeof(_reg)), r32(_src));
 		}
 
-		void movDspReg(const int8_t& _reg, const JitRegGP& _src) const;
+		void movDspReg(const int8_t& _dst, const JitRegGP& _src) const;
 
 		template<typename T, unsigned int B>
 		void movDspReg(const JitRegGP& _dst, const RegType<T, B>& _reg) const
 		{
 			static_assert(sizeof(_reg.var) == sizeof(uint64_t) || sizeof(_reg.var) == sizeof(uint32_t) || sizeof(_reg.var) == sizeof(uint8_t), "unknown register size");
-			mov(_dst, makeDspPtr(_reg));
+			mov<sizeof(_reg.var)>(_dst, makeDspPtr(_reg));
 		}
 
 		void movDspReg(const JitRegGP& _dst, const TWord& _reg) const
 		{
-			mov(r32(_dst), makeDspPtr(&_reg, sizeof(_reg)));
+			mov<sizeof(_reg)>(r32(_dst), makeDspPtr(&_reg, sizeof(_reg)));
 		}
 
-		void movDspReg(const JitRegGP& _dst, const int8_t& _reg) const;
+		void movDspReg(const JitRegGP& _dst, const int8_t& _src) const;
 
 		template<typename T, unsigned int B>
 		JitMemPtr makeDspPtr(const RegType<T, B>& _reg) const
@@ -219,17 +179,36 @@ namespace dsp56k
 
 		void reset();
 
+		RegisterMask toRegisterMask(PoolReg _reg, bool _writeAccess);
+
+		void getXY(const JitReg64& _dst, uint32_t _xy);
+		void getXY0(const JitReg32& _dst, uint32_t _xy);
+		void getXY1(const JitReg32& _dst, uint32_t _xy);
+
+		void setXY0(uint32_t _xy, const DspValue& _src);
+		void setXY1(uint32_t _xy, const DspValue& _src);
+
+		const auto& gpList() const { return m_gpList; }
+		const auto& xmmList() const { return m_xmList; }
+
+		bool canMakeSpace(PoolReg _reg, PoolReg _excludeReg) const;
+		bool canMakeSpace(PoolReg _excludeReg = PoolReg::DspCount) const;
+
 	private:
-		void parallelOpEpilog(DspReg _aluReadReg, DspReg _aluWriteReg);
+		JitRegPoolRegPair& getPair(const bool _y)
+		{
+			return _y ? m_pairY : m_pairX;
+		}
+		void parallelOpEpilog(PoolReg _aluReadReg, PoolReg _aluWriteReg);
 		
-		void makeSpace(DspReg _wantedReg);
+		void makeSpace(PoolReg _wantedReg);
 		void clear();
 
-		void load(const JitRegGP& _dst, DspReg _src);
-		void store(DspReg _dst, const JitRegGP& _src) const;
-		void store(DspReg _dst, const SpillReg& _src) const;
+		void load(const JitRegGP& _dst, PoolReg _src);
+		void store(PoolReg _dst, const JitRegGP& _src) const;
+		void store(PoolReg _dst, const SpillReg& _src);
 
-		bool release(DspReg _dst);
+		bool release(PoolReg _dst);
 
 		template<typename T> void push(std::list<T>& _dst, const T& _src)
 		{
@@ -239,21 +218,21 @@ namespace dsp56k
 				_dst.push_back(_src);
 		}
 
-		void setLoaded(DspReg _reg)				{ flagSet(m_loadedDspRegs, _reg); }
-		void clearLoaded(DspReg _reg)			{ flagClear(m_loadedDspRegs, _reg); }
+		void setLoaded(PoolReg _reg)				{ flagSet(m_loadedDspRegs, _reg); }
+		void clearLoaded(PoolReg _reg)			{ flagClear(m_loadedDspRegs, _reg); }
 
-		void setWritten(DspReg _reg)			{ m_dirty |= flagSet(m_writtenDspRegs, _reg); }
-		void clearWritten(DspReg _reg)			{ m_dirty |= flagClear(m_writtenDspRegs, _reg); }
+		void setWritten(PoolReg _reg)			{ m_dirty |= flagSet(m_writtenDspRegs, _reg); }
+		void clearWritten(PoolReg _reg)			{ m_dirty |= flagClear(m_writtenDspRegs, _reg); }
 
-		void setLocked(DspReg _reg)				{ flagSet(m_lockedGps, _reg); }
-		void clearLocked(DspReg _reg)			{ flagClear(m_lockedGps, _reg); }
+		void setLocked(PoolReg _reg)				{ flagSet(m_lockedGps, _reg); }
+		void clearLocked(PoolReg _reg)			{ flagClear(m_lockedGps, _reg); }
 
-		void setSpilled(DspReg _reg)			{ flagSet(m_spilledDspRegs, _reg); }
-		void clearSpilled(DspReg _reg)			{ flagClear(m_spilledDspRegs, _reg); }
+		void setSpilled(PoolReg _reg)			{ flagSet(m_spilledDspRegs, _reg); }
+		void clearSpilled(PoolReg _reg)			{ flagClear(m_spilledDspRegs, _reg); }
 
-		static bool flagSet(DspRegFlags& _flags, DspReg _reg);
-		static bool flagClear(DspRegFlags& _flags, DspReg _reg);
-		static bool flagTest(const DspRegFlags& _flags, DspReg _reg);
+		static bool flagSet(DspRegFlags& _flags, PoolReg _reg);
+		static bool flagClear(DspRegFlags& _flags, PoolReg _reg);
+		static bool flagTest(const DspRegFlags& _flags, PoolReg _reg);
 
 		template<typename T> class RegisterList
 		{
@@ -265,7 +244,7 @@ namespace dsp56k
 			}
 
 			bool isFull() const					{ return m_available.empty(); }
-			bool isUsed(DspReg _reg) const		{ return m_usedMap[_reg].isValid(); }
+			bool isUsed(PoolReg _reg) const		{ return m_usedMap[_reg].isValid(); }
 			bool isUsed(const T& _reg) const
 			{
 				for(size_t i=0; i<DspCount; ++i)
@@ -279,7 +258,7 @@ namespace dsp56k
 			size_t available() const			{ return m_available.size(); }
 			size_t size() const { return m_used.size(); }
 
-			bool acquire(T& _dst, const DspReg _reg, bool _pushFront)
+			bool acquire(T& _dst, const PoolReg _reg, bool _pushFront)
 			{
 				const auto existing = m_usedMap[_reg];
 
@@ -306,13 +285,13 @@ namespace dsp56k
 				return true;
 			}
 
-			bool get(T& _dst, const DspReg _reg)
+			bool get(T& _dst, const PoolReg _reg)
 			{
 				_dst = m_usedMap[_reg];
 				return _dst.isValid();
 			}
 
-			bool release(T& _dst, DspReg _reg, bool _pushFront)
+			bool release(T& _dst, PoolReg _reg, bool _pushFront)
 			{
 				_dst = m_usedMap[_reg];
 				if(!_dst.isValid())
@@ -336,7 +315,7 @@ namespace dsp56k
 					m_usedMap[i].reset();
 			}
 
-			const std::vector<DspReg>& used() const { return m_used; }
+			const std::vector<PoolReg>& used() const { return m_used; }
 
 		private:
 			template<typename TT> static void push(std::vector<TT>& _dst, const TT& _src, bool _pushFront)
@@ -346,7 +325,7 @@ namespace dsp56k
 				else
 					_dst.push_back(_src);
 			}
-			template<typename TT> static void remove(std::vector<TT>& _dst, const DspReg _src)
+			template<typename TT> static void remove(std::vector<TT>& _dst, const PoolReg _src)
 			{
 				for(auto it = _dst.begin(); it != _dst.end(); ++it)
 				{
@@ -358,21 +337,26 @@ namespace dsp56k
 				}
 			}
 			std::vector<T> m_available;
-			std::vector<DspReg> m_used;
+			std::vector<PoolReg> m_used;
 			T m_usedMap[DspCount];
 		};
 
+		template<size_t ByteSize>
 		void mov (const JitMemPtr& _dst, const JitRegGP& _src) const;
 		void movd(const JitMemPtr& _dst, const SpillReg& _src) const;
 		void movq(const JitMemPtr& _dst, const SpillReg& _src) const;
 
+		template<size_t ByteSize>
 		void mov (const JitRegGP& _dst , const JitMemPtr& _src) const;
 		void movd(const JitReg128& _dst, const JitMemPtr& _src) const;
 		void movq(const JitReg128& _dst, const JitMemPtr& _src) const;
 
-		void spillMove(const JitRegGP& _dst, const SpillReg& _src) const;
+		void spillMove(PoolReg _reg, const JitRegGP& _dst, const SpillReg& _src);
 		void spillMove(const SpillReg& _dst, const JitRegGP& _src) const;
-		void spillMove(const SpillReg& _dst, const SpillReg& _src) const;
+		void spillMove(PoolReg _reg, const SpillReg& _dst, const JitRegGP& _src);
+		void spillMove(const SpillReg& _dst, const SpillReg& _src);
+
+		void setUsed(const JitReg128& _reg);
 
 		JitBlock& m_block;
 
@@ -383,29 +367,31 @@ namespace dsp56k
 
 		RegisterList<JitRegGP> m_gpList;
 		RegisterList<SpillReg> m_xmList;
-		std::array<asmjit::BaseNode*, DspCount> m_moveToXmmInstruction{};
 
-		std::vector<DspReg> m_availableTemps;
+		struct SpillMove
+		{
+			asmjit::BaseNode* beforeSpillMoveOp = nullptr;
+			asmjit::BaseNode* spillMoveOp = nullptr;
+			JitRegGP sourceReg{};
 
-		const bool m_extendedSpillSpace;
+			bool isValid() const { return spillMoveOp != nullptr; }
+
+			void reset()
+			{
+				beforeSpillMoveOp = spillMoveOp = nullptr;
+				sourceReg.reset();
+			}
+		};
+
+		std::array<SpillMove, DspCount> m_moveToXmmInstruction{};
+
+		std::vector<PoolReg> m_availableTemps;
+		std::list<JitReg128> m_usedXmRegs;
+
 		bool m_isParallelOp = false;
 		bool m_repMode = false;
-		mutable JitMemPtr m_dspPtr;
 		bool m_dirty = false;
+
+		JitRegPoolRegPair m_pairX, m_pairY;
 	};
-
-	static constexpr JitDspRegPool::DspRegFlags operator | (const JitDspRegPool::DspRegFlags& _a, const JitDspRegPool::DspRegFlags& _b)
-	{
-		return static_cast<JitDspRegPool::DspRegFlags>(static_cast<uint64_t>(_a) | static_cast<uint64_t>(_b));
-	}
-
-	static constexpr JitDspRegPool::DspRegFlags operator & (const JitDspRegPool::DspRegFlags& _a, const JitDspRegPool::DspRegFlags& _b)
-	{
-		return static_cast<JitDspRegPool::DspRegFlags>(static_cast<uint64_t>(_a) & static_cast<uint64_t>(_b));
-	}
-
-	static constexpr JitDspRegPool::DspRegFlags operator ~ (const JitDspRegPool::DspRegFlags& _a)
-	{
-		return static_cast<JitDspRegPool::DspRegFlags>(~static_cast<uint64_t>(_a));
-	}
 }

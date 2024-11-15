@@ -29,6 +29,14 @@ namespace dsp56k
 	const RuntimeFieldInfos g_runtimeFieldInfos;
 
 	static_assert(getFieldInfoCE<Bsset_S, Field_DDDDDD>().bit == 8, "invalid");
+	static_assert(getFieldInfoCE<Bsset_S, Field_DDDDDD>().len == 6, "invalid");
+	static_assert(getFieldInfoCE<Bsset_S, Field_bbbbb>().bit == 0, "invalid");
+	static_assert(getFieldInfoCE<Bsset_S, Field_bbbbb>().len == 5, "invalid");
+
+	static_assert(getFieldInfoCE<Add_xxxx, Field_oo>().bit == 4, "invalid");
+	static_assert(getFieldInfoCE<Add_xxxx, Field_oo>().len == 2, "invalid");
+	static_assert(getFieldInfoCE<Add_xxxx, Field_ooooo>().len == 5, "invalid");
+	static_assert(getFieldInfoCE<Add_xxxx, Field_ooooo>().bit == 9, "invalid");
 
 	const FieldInfo& getFieldInfo(const Instruction _i, const Field _f)
 	{
@@ -95,7 +103,7 @@ namespace dsp56k
 		return getOpcodeLength(_op, instA, instB);
 	}
 
-	uint32_t Opcodes::getOpcodeLength(const TWord _op, Instruction _instA, Instruction _instB) const
+	uint32_t Opcodes::getOpcodeLength(const TWord _op, Instruction _instA, Instruction _instB)
 	{
 		const auto lenA = _instA != Invalid ? dsp56k::getOpcodeLength(_instA, _op) : 0;
 		const auto lenB = _instB != Invalid ? dsp56k::getOpcodeLength(_instB, _op) : 0;
@@ -161,23 +169,27 @@ namespace dsp56k
 		return res;
 	}
 
-	bool Opcodes::getRegisters(RegisterMask& _written, RegisterMask& _read, TWord _opA, TWord _opB) const
+	bool Opcodes::getRegisters(RegisterMask& _written, RegisterMask& _read, const TWord _opA) const
 	{
 		Instruction instA, instB;
 		getInstructionTypes(_opA, instA, instB);
+		return getRegisters(_written, _read, _opA, instA, instB);
+	}
 
+	bool Opcodes::getRegisters(RegisterMask& _written, RegisterMask& _read, const TWord _opA, const Instruction _instA, const Instruction _instB)
+	{
 		_written = _read = RegisterMask::None;
 
-		if(instA != Invalid && instA != Nop)
+		if(_instA != Invalid && _instA != Nop)
 		{
-			dsp56k::getRegisters(_written, _read, instA, _opA);
+			dsp56k::getRegisters(_written, _read, _instA, _opA);
 		}
 
-		if(instB != Invalid && instB != Nop)
+		if(_instB != Invalid && _instB != Nop)
 		{
 			auto written = RegisterMask::None;
 			auto read = RegisterMask::None;
-			dsp56k::getRegisters(written, read, instB, _opA);
+			dsp56k::getRegisters(written, read, _instB, _opA);
 			_written |= written;
 			_read |= read;
 		}
@@ -210,19 +222,22 @@ namespace dsp56k
 	{
 		const OpcodeInfo* res = nullptr;
 
-		for (size_t i=0; i<_opcodes.size(); ++i)
+		for (const auto* oi : _opcodes)
 		{
-			const auto* oi = _opcodes[i];
-
 			if(match(*oi, _opcode))
 			{
+#ifdef _DEBUG
 				if(res != nullptr)
 				{
+					// it is unexpected that we have a second match. debugging helpers below, two opcodes for the same opcode should not happen
 					match(*oi, _opcode);
 					match(*res, _opcode);
-					assert(res == nullptr);
+					assert(res == nullptr && "opcode collision, more than one instruction possible");
 				}
 				res = oi;
+#else
+				return oi;
+#endif
 			}
 		}
 		return res;

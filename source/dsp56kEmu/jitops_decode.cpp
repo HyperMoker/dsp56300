@@ -1,3 +1,4 @@
+#include "jitdspmode.h"
 #include "jitops.h"
 #include "types.h"
 
@@ -190,23 +191,32 @@ namespace dsp56k
 	{
 		const auto i = _dddddd & 0x3f;
 
-		auto makeRef = [&](JitDspRegPool::DspReg _reg)
+		auto makeRef = [&](PoolReg _reg)
 		{
 			return DspValue(m_block, _reg, _read, _write);
+		};
+
+		// do not support references in 16 bit compat mode as we need to manipulate these regs when reading/writing by limiting to 16 bits
+		auto makeRefNonSC = [&](const PoolReg _reg) -> DspValue
+		{
+			const auto* mode = m_block.getMode();
+			if(mode && mode->testSR(SRB_SC))
+				return DspValue(m_block);
+			return makeRef(_reg);
 		};
 
 		switch( i )
 		{
 		// 0000DD - 4 registers in data ALU - NOT DOCUMENTED but the motorola disasm claims it works, for example for the lua instruction
-		case 0x00:
-		case 0x01:
-		case 0x02:
-		case 0x03:
+		case 0x00:	return makeRef(PoolReg::DspX0);
+		case 0x01:	return makeRef(PoolReg::DspX1);
+		case 0x02:	return makeRef(PoolReg::DspY0);
+		case 0x03:	return makeRef(PoolReg::DspY1);
 		// 0001DD - 4 registers in data ALU
-		case 0x04:
-		case 0x05:
-		case 0x06:
-		case 0x07:
+		case 0x04:	return makeRef(PoolReg::DspX0);
+		case 0x05:	return makeRef(PoolReg::DspX1);
+		case 0x06:	return makeRef(PoolReg::DspY0);
+		case 0x07:	return makeRef(PoolReg::DspY1);
 
 		// 001DDD - 8 accumulators in data ALU
 		case 0x08:
@@ -216,38 +226,38 @@ namespace dsp56k
 		case 0x0c:
 		case 0x0d:  return DspValue(m_block);
 
-		case 0x0e:	return makeRef(JitDspRegPool::DspA);
-		case 0x0f:	return makeRef(JitDspRegPool::DspB);
+		case 0x0e:	return makeRef(PoolReg::DspA);
+		case 0x0f:	return makeRef(PoolReg::DspB);
 
 		// 010TTT - 8 address registers in AGU
-		case 0x10:	return makeRef(JitDspRegPool::DspR0);
-		case 0x11:	return makeRef(JitDspRegPool::DspR1);
-		case 0x12:	return makeRef(JitDspRegPool::DspR2);
-		case 0x13:	return makeRef(JitDspRegPool::DspR3);
-		case 0x14:	return makeRef(JitDspRegPool::DspR4);
-		case 0x15:	return makeRef(JitDspRegPool::DspR5);
-		case 0x16:	return makeRef(JitDspRegPool::DspR6);
-		case 0x17:	return makeRef(JitDspRegPool::DspR7);
+		case 0x10:	return makeRefNonSC(PoolReg::DspR0);
+		case 0x11:	return makeRefNonSC(PoolReg::DspR1);
+		case 0x12:	return makeRefNonSC(PoolReg::DspR2);
+		case 0x13:	return makeRefNonSC(PoolReg::DspR3);
+		case 0x14:	return makeRefNonSC(PoolReg::DspR4);
+		case 0x15:	return makeRefNonSC(PoolReg::DspR5);
+		case 0x16:	return makeRefNonSC(PoolReg::DspR6);
+		case 0x17:	return makeRefNonSC(PoolReg::DspR7);
 
 		// 011NNN - 8 address offset registers in AGU
-		case 0x18:	return makeRef(JitDspRegPool::DspN0);
-		case 0x19:	return makeRef(JitDspRegPool::DspN1);
-		case 0x1a:	return makeRef(JitDspRegPool::DspN2);
-		case 0x1b:	return makeRef(JitDspRegPool::DspN3);
-		case 0x1c:	return makeRef(JitDspRegPool::DspN4);
-		case 0x1d:	return makeRef(JitDspRegPool::DspN5);
-		case 0x1e:	return makeRef(JitDspRegPool::DspN6);
-		case 0x1f:	return makeRef(JitDspRegPool::DspN7);
+		case 0x18:	return makeRefNonSC(PoolReg::DspN0);
+		case 0x19:	return makeRefNonSC(PoolReg::DspN1);
+		case 0x1a:	return makeRefNonSC(PoolReg::DspN2);
+		case 0x1b:	return makeRefNonSC(PoolReg::DspN3);
+		case 0x1c:	return makeRefNonSC(PoolReg::DspN4);
+		case 0x1d:	return makeRefNonSC(PoolReg::DspN5);
+		case 0x1e:	return makeRefNonSC(PoolReg::DspN6);
+		case 0x1f:	return makeRefNonSC(PoolReg::DspN7);
 
 		// 100FFF - 8 address modifier registers in AGU
-		case 0x20:	return makeRef(JitDspRegPool::DspM0);
-		case 0x21:	return makeRef(JitDspRegPool::DspM1);
-		case 0x22:	return makeRef(JitDspRegPool::DspM2);
-		case 0x23:	return makeRef(JitDspRegPool::DspM3);
-		case 0x24:	return makeRef(JitDspRegPool::DspM4);
-		case 0x25:	return makeRef(JitDspRegPool::DspM5);
-		case 0x26:	return makeRef(JitDspRegPool::DspM6);
-		case 0x27:	return makeRef(JitDspRegPool::DspM7);
+		case 0x20:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM0);
+		case 0x21:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM1);
+		case 0x22:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM2);
+		case 0x23:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM3);
+		case 0x24:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM4);
+		case 0x25:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM5);
+		case 0x26:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM6);
+		case 0x27:	return _write ? DspValue(m_block) : makeRefNonSC(PoolReg::DspM7);
 
 		// 101EEE - 1 address register in AGU
 		case 0x2a:
@@ -258,13 +268,13 @@ namespace dsp56k
 
 		// 111GGG - 8 program controller registers
 		case 0x38:	return DspValue(m_block);
-		case 0x39:	return makeRef(JitDspRegPool::DspSR);
+		case 0x39:	return makeRef(PoolReg::DspSR);
 		case 0x3a:
 		case 0x3b:
 		case 0x3c:
 		case 0x3d:	return DspValue(m_block);
-		case 0x3e:	return makeRef(JitDspRegPool::DspLA);
-		case 0x3f:	return makeRef(JitDspRegPool::DspLC);
+		case 0x3e:	return makeRef(PoolReg::DspLA);
+		case 0x3f:	return makeRef(PoolReg::DspLC);
 		default:
 			assert(0 && "invalid dddddd value");
 		}
@@ -345,6 +355,16 @@ namespace dsp56k
 		assert(0 && "invalid ee value");
 	}
 
+	DspValue JitOps::decode_ee_ref(const TWord _ee, bool _read, bool _write)
+	{
+		switch (_ee)
+		{
+		case 0: return DspValue(getBlock(), PoolReg::DspX0, _read, _write);
+		case 1: return DspValue(getBlock(), PoolReg::DspX1, _read, _write);
+		}
+		return DspValue(getBlock());
+	}
+
 	void JitOps::decode_ff_read(DspValue& _dst, TWord _ff)
 	{
 		switch (_ff)
@@ -369,6 +389,16 @@ namespace dsp56k
 		case 3: transfer24ToAlu(1, _value); break;
 		default: assert(false && "invalid ff value"); break;
 		}
+	}
+
+	DspValue JitOps::decode_ff_ref(const TWord _ff, bool _read, bool _write)
+	{
+		switch (_ff)
+		{
+		case 0: return DspValue(getBlock(), PoolReg::DspY0, _read, _write);
+		case 1: return DspValue(getBlock(), PoolReg::DspY1, _read, _write);
+		}
+		return DspValue(getBlock());
 	}
 
 	void JitOps::decode_EE_read(RegGP& dst, TWord _ee)
@@ -404,13 +434,13 @@ namespace dsp56k
 		switch (_jjj)
 		{
 		case 0:
-		case 1:			m_dspRegs.getALU(_dst, _b ? 1 : 0);			break;
-		case 2:			XYto56(_dst, 0);							break;
-		case 3: 		XYto56(_dst, 1);							break;
-		case 4:			XY0to56(_dst, 0);							break;
-		case 5: 		XY0to56(_dst, 1);							break;
-		case 6:			XY1to56(_dst, 0);							break;
-		case 7: 		XY1to56(_dst, 1);							break;
+		case 1:			m_dspRegs.getALU(_dst, _b ? 1 : 0);	break;
+		case 2:			XYto56(_dst, 0);					break;
+		case 3: 		XYto56(_dst, 1);					break;
+		case 4:			XY0to56(_dst, 0);					break;
+		case 5: 		XY0to56(_dst, 1);					break;
+		case 6:			XY1to56(_dst, 0);					break;
+		case 7: 		XY1to56(_dst, 1);					break;
 		default:
 			assert(0 && "unreachable, invalid JJJ value");
 		}
@@ -419,27 +449,14 @@ namespace dsp56k
 	DspValue JitOps::decode_JJJ_read_56(const TWord _jjj, const bool _b) const
 	{
 		if(_jjj < 2)
-			return DspValue(m_block, _b ? JitDspRegPool::DspReg::DspB : JitDspRegPool::DspReg::DspA, true, false);
+			return DspValue(m_block, _b ? PoolReg::DspB : PoolReg::DspA, true, false);
 
 		DspValue v(m_block);
 		v.temp(DspValue::Temp56);
 		const auto& r = r64(v.get());
 
-		switch (_jjj)
-		{
-		case 0:
-		case 1:
-		case 2:			XYto56(r, 0);							break;
-		case 3: 		XYto56(r, 1);							break;
-		case 4:			XY0to56(r, 0);							break;
-		case 5: 		XY0to56(r, 1);							break;
-		case 6:			XY1to56(r, 0);							break;
-		case 7: 		XY1to56(r, 1);							break;
-		default:
-			assert(0 && "unreachable, invalid JJJ value");
-			return DspValue(m_block);
-		}
-		return DspValue(std::move(v));
+		decode_JJJ_read_56(r, _jjj, _b);
+		return v;
 	}
 
 	void JitOps::decode_JJ_read(DspValue& _dst, TWord jj) const
@@ -477,7 +494,7 @@ namespace dsp56k
 			return dst;
 		}
 
-		return DspValue(m_block, JitDspRegPool::DspR0, true, false, rrr);
+		return DspValue(m_block, PoolReg::DspR0, true, false, rrr);
 	}
 
 	void JitOps::decode_qq_read(DspValue& _dst, TWord _qq, bool _signextend)
@@ -584,8 +601,8 @@ namespace dsp56k
 #endif
 			}
 			break;
-		case 4:	// TODO: 48 bit saturation/limiting			// A
-		case 5:	// TODO: 48 bit saturation/limiting			// B
+		case 4:												// A
+		case 5:												// B
 			{
 				const auto alu = _lll - 4;
 				transferSaturation48(r64(y), r64(m_dspRegs.getALU(alu)));
@@ -604,16 +621,9 @@ namespace dsp56k
 		case 3:												// Y
 			{
 				const auto xy = _lll - 2;
-#ifdef HAVE_ARM64
-				const auto src = m_block.dspRegPool().read(xy ? JitDspRegPool::DspY : JitDspRegPool::DspX);
-				m_asm.ubfx(r64(x), r64(src), asmjit::Imm(24), asmjit::Imm(24));
-				m_asm.ubfx(r64(y), r64(src), asmjit::Imm(0), asmjit::Imm(24));
-#else
-				m_dspRegs.getXY(r64(y), xy);
-				m_asm.ror(r64(x), r64(y), 24);
-				m_asm.and_(r32(x), asmjit::Imm(0xffffff));
-				m_asm.and_(r32(y), asmjit::Imm(0xffffff));
-#endif
+
+				m_block.dspRegPool().getXY0(r32(y), xy);
+				m_block.dspRegPool().getXY1(r32(x), xy);
 			}
 			break;
 		case 6:												// AB
@@ -630,7 +640,7 @@ namespace dsp56k
 		}
 	}
 
-	void JitOps::decode_LLL_write(TWord _lll, const DspValue& x, const DspValue& y)
+	void JitOps::decode_LLL_write(TWord _lll, DspValue&& x, DspValue&& y)
 	{
 		switch (_lll)
 		{
@@ -675,14 +685,8 @@ namespace dsp56k
 			{
 				const auto xy = _lll - 2;
 
-				const auto r = m_dspRegs.getXY(xy, JitDspRegs::Write);
-#ifdef HAVE_ARM64
-				m_asm.bfi(r64(r), r64(x), asmjit::Imm(24), asmjit::Imm(24));
-				m_asm.bfi(r64(r), r64(y), asmjit::Imm(0), asmjit::Imm(24));
-#else
-				m_asm.rol(r64(r), r32(x.get()), 24);
-				m_asm.or_(r64(r), r64(y.get()));
-#endif
+				m_block.dspRegPool().setXY0(xy, y);
+				m_block.dspRegPool().setXY1(xy, x);
 			}
 			break;
 		case 6:												// AB
@@ -696,6 +700,16 @@ namespace dsp56k
 		default:
 			assert(0 && "invalid LLL value");
 			break;
+		}
+	}
+
+	std::pair<DspValue, DspValue> JitOps::decode_LLL_ref(const TWord _lll, const bool _read, const bool _write) const
+	{
+		switch(_lll)
+		{
+		case 2:		return {DspValue(m_block, DspX1, _read, _write), DspValue(m_block, DspX0, _read, _write)};
+		case 3:		return {DspValue(m_block, DspY1, _read, _write), DspValue(m_block, DspY0, _read, _write)};
+		default:	return {DspValue(m_block), DspValue(m_block)};
 		}
 	}
 

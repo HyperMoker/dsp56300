@@ -2,23 +2,23 @@
 
 #include <memory>
 
-#include "jitcacheentry.h"
 #include "types.h"
 
 #include <set>
 #include <vector>
+#include <unordered_map>
 
 #include "debuggerinterface.h"
+
 #include "jitblockchain.h"
+#include "jitcacheentry.h"
 #include "jitconfig.h"
 #include "jitdspmode.h"
-#include "jitemitter.h"
 #include "jitruntimedata.h"
-#include "logging.h"
 
 namespace asmjit
 {
-	inline namespace _abi_1_9
+	inline namespace ASMJIT_ABI_NAMESPACE
 	{
 		class JitRuntime;
 		class CodeHolder;
@@ -43,8 +43,6 @@ namespace dsp56k
 
 		void exec(const TWord _pc)
 		{
-//			if(_pc < 0x1500 && (_pc < 0x740 || _pc >= 0x750))
-//				LOG(HEX(reinterpret_cast<uint64_t>(this)) << " exec @ " << HEX(_pc));
 			m_currentChain->exec(_pc);
 		}
 
@@ -56,6 +54,7 @@ namespace dsp56k
 		void runCheckModeChange(TWord _pc);
 
 		const JitConfig& getConfig() const { return m_config; }
+		JitConfig getConfig(TWord _pc) const;
 		void setConfig(const JitConfig& _config) { m_config = _config; }
 		void resetHW();
 		const std::map<TWord, TWord>& getLoops() const { return m_loops; }
@@ -82,6 +81,7 @@ namespace dsp56k
 		void removeLoop(TWord _begin);
 
 		void destroy(TWord _pc);
+		void destroyToRecreate(TWord _pc);
 
 		void checkModeChange();
 
@@ -89,22 +89,27 @@ namespace dsp56k
 
 		void destroyAllBlocks();
 
-		JitBlockEmitter* acquireEmitter();
+		JitBlockEmitter* acquireEmitter(TWord _pc);
 		void releaseEmitter(JitBlockEmitter* _emitter);
 
 		JitBlockRuntimeData* acquireBlockRuntimeData();
 		void releaseBlockRuntimeData(JitBlockRuntimeData* _b);
 
-	private:
-		void emit(TWord _pc);
+		void onFuncsResized(const JitBlockChain& _chain) const;
 
+	private:
 		void checkPMemWrite();
 
 		DSP& m_dsp;
 
-		asmjit::_abi_1_9::JitRuntime* m_rt = nullptr;
+		asmjit::ASMJIT_ABI_NAMESPACE::JitRuntime* m_rt = nullptr;
 
-		std::map<JitDspMode, std::unique_ptr<JitBlockChain>> m_chains;
+		struct DspModeHash
+		{
+		    std::size_t operator () (const JitDspMode& m) const	{ return m.get(); }
+		};
+
+		std::unordered_map<JitDspMode, std::unique_ptr<JitBlockChain>, DspModeHash> m_chains;
 		JitBlockChain* m_currentChain = nullptr;
 
 		std::vector<TJitFunc> m_jitFuncs;
@@ -118,6 +123,8 @@ namespace dsp56k
 		std::vector<JitBlockRuntimeData*> m_blockRuntimeDatas;
 
 		JitConfig m_config;
+
+		size_t m_maxUsedPAddress = 0;
 
 		// the following data is accessed by JIT code at runtime, it NEEDS to be put last into this struct to be
 		// able to use ARM relative addressing, see member ordering in dsp.h

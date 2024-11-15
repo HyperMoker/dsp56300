@@ -33,7 +33,7 @@ namespace dsp56k
 
 		m_block.dspRegPool().unlock(m_dspReg);
 		m_block.dspRegPool().releaseTemp(m_dspReg);
-		m_dspReg = JitDspRegPool::DspRegInvalid;
+		m_dspReg = PoolReg::DspRegInvalid;
 	}
 
 	AluReg::AluReg(JitBlock& _block, const TWord _aluIndex, bool readOnly/* = false*/, bool writeOnly/* = false*/)
@@ -85,8 +85,11 @@ namespace dsp56k
 		}
 		else
 		{
-			const auto dspReg = static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspA + m_aluIndex);
-			p.unlock(dspReg);
+			const auto dspReg = static_cast<PoolReg>(PoolReg::DspA + m_aluIndex);
+			if (m_lockedByUs)
+				p.unlock(dspReg);
+			else
+				assert(p.isLocked(dspReg) && "Register has been unlocked by someone else too early");
 		}
 	}
 
@@ -99,8 +102,19 @@ namespace dsp56k
 
 		JitRegGP r;
 
-		const auto dspRegR = static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspA      + m_aluIndex);
-		const auto dspRegW = static_cast<JitDspRegPool::DspReg>(JitDspRegPool::DspAwrite + m_aluIndex);
+		const auto dspRegR = static_cast<PoolReg>(PoolReg::DspA      + m_aluIndex);
+		const auto dspRegW = static_cast<PoolReg>(PoolReg::DspAwrite + m_aluIndex);
+
+		auto lock = [this](const PoolReg _reg)
+		{
+			auto& pool = m_block.dspRegPool();
+
+			if(!pool.isLocked(_reg))
+			{
+				pool.lock(_reg);
+				m_lockedByUs = true;
+			}
+		};
 
 		if(p.isParallelOp() && m_write)
 		{
@@ -109,7 +123,7 @@ namespace dsp56k
 			if(m_read)
 			{
 				rRead = p.get(dspRegR, true, false);
-				p.lock(dspRegR);
+				lock(dspRegR);
 			}
 
 			r = p.get(dspRegW, false, true);
@@ -120,13 +134,18 @@ namespace dsp56k
 			if(m_read)
 			{
 				m_block.asm_().mov(r, rRead);
-				p.unlock(dspRegR);
+
+				if(m_lockedByUs)
+				{
+					m_lockedByUs = false;
+					p.unlock(dspRegR);
+				}
 			}
 		}
 		else
 		{
 			r = p.get(dspRegR, m_read, m_write);
-			p.lock(dspRegR);
+			lock(dspRegR);
 		}
 		m_reg = r.as<JitReg64>();
 		return m_reg;
@@ -154,104 +173,90 @@ namespace dsp56k
 		m_block.stack().unregisterFuncArg(m_funcArgIndex);
 	}
 
-	PushXMM::PushXMM(JitBlock& _block, uint32_t _xmmIndex) : m_block(_block), m_xmmIndex(_xmmIndex), m_isLoaded(m_block.dspRegPool().isInUse(JitReg128(_xmmIndex)))
+#ifdef HAVE_X86_64
+	ShiftReg::ShiftReg(JitBlock& _block): PushGP(_block, asmjit::x86::rcx)
 	{
-		if(!m_isLoaded)
-			return;
-
-		const auto xm = JitReg128(_xmmIndex);
-
-		_block.stack().push(xm);
+		_block.lockShift();
 	}
 
-	PushXMM::~PushXMM()
+	ShiftReg::~ShiftReg()
 	{
-		if(!m_isLoaded)
+		m_block.unlockShift();
+	}
+#endif
+	void ShiftTemp::acquire()
+	{
+		if(isValid())
 			return;
-
-		const auto xm = JitReg128(m_xmmIndex);
-
-		m_block.stack().pop(xm);
+		m_reg.reset(new ShiftReg(m_block));
 	}
 
-	PushXMMRegs::PushXMMRegs(JitBlock& _block) : m_block(_block)
+	void ShiftTemp::release()
+	{
+		m_reg.reset();
+	}
+
+	template <typename T> PushRegs<T>::~PushRegs()
+	{
+		for (const auto& r : m_pushedRegs)
+			m_block.stack().pop(r);
+	}
+
+	template <typename T> void PushRegs<T>::push(const T& _reg)
+	{
+		if(!_reg.isValid() || JitStackHelper::isNonVolatile(_reg))
+			return;
+		m_pushedRegs.push_front(_reg);
+		m_block.stack().push(_reg);
+	}
+
+	template class PushRegs<JitReg64>;
+	template class PushRegs<JitReg128>;
+
+	PushXMMRegs::PushXMMRegs(JitBlock& _block) : PushRegs(_block)
 	{
 		for (const auto& xm : g_dspPoolXmms)
 		{
-			if (!xm.isValid())
-				continue;
-			if (!JitStackHelper::isNonVolatile(xm) && m_block.dspRegPool().isInUse(xm))
-			{
-				m_pushedRegs.push_front(xm);
-				m_block.stack().push(xm);
-			}
+			if (xm.isValid() && m_block.dspRegPool().isInUse(xm))
+				push(xm);
 		}
 
-		if (!JitStackHelper::isNonVolatile(regXMMTempA) && m_block.xmmPool().isInUse(regXMMTempA))
-		{
-			m_pushedRegs.push_front(regXMMTempA);
-			_block.stack().push(regXMMTempA);
-		}
+		if (m_block.xmmPool().isInUse(regXMMTempA))
+			push(regXMMTempA);
 
-		if(!JitStackHelper::isNonVolatile(regLastModAlu) && m_block.stack().isUsed(regLastModAlu))
-		{
-			m_pushedRegs.push_front(regLastModAlu);
-			_block.stack().push(regLastModAlu);
-		}
+		if (m_block.stack().isUsed(regLastModAlu))
+			push(regLastModAlu);
 	}
 
-	PushXMMRegs::~PushXMMRegs()
-	{
-		for (const auto& xm : m_pushedRegs)
-			m_block.stack().pop(xm);
-	}
-
-	PushGPRegs::PushGPRegs(JitBlock& _block, bool _isJitCall) : m_block(_block)
+	PushGPRegs::PushGPRegs(JitBlock& _block) : PushRegs(_block)
 	{
 		for (const auto& gp : g_dspPoolGps)
 		{
-			if (!JitStackHelper::isNonVolatile(gp) && !m_block.stack().isUsedFuncArg(gp) && m_block.dspRegPool().isInUse(gp))
-			{
-				m_pushedRegs.push_front(gp);
-				_block.stack().push(r64(gp));
-			}
+			if (m_block.dspRegPool().isInUse(gp))
+				push(gp);
 		}
-		for (auto reg : g_regGPTemps)
+		for (const auto& reg : g_regGPTemps)
 		{
 			const auto gp = reg.as<JitRegGP>();
-
-			if (!JitStackHelper::isNonVolatile(gp) && !m_block.stack().isUsedFuncArg(gp) && m_block.gpPool().isInUse(gp))
-			{
-				m_pushedRegs.push_front(gp);
-				_block.stack().push(r64(gp));
-			}
+			if (m_block.gpPool().isInUse(gp))
+				push(gp);
 		}
 
-		// there is no need to save the dsp reg as it is rebuilt in the JIT func anyway
-		if(!_isJitCall)
-		{
-			if(!JitStackHelper::isNonVolatile(regDspPtr) && !m_block.stack().isUsedFuncArg(regDspPtr))
-			{
-				m_pushedRegs.push_front(regDspPtr);
-				_block.stack().push(regDspPtr);
-			}
-		}
+		push(regDspPtr);
 
 #ifdef HAVE_ARM64
-		m_pushedRegs.push_front(asmjit::a64::regs::x30);
-		_block.stack().push(asmjit::a64::regs::x30);
+		push(asmjit::a64::regs::x30);
 #endif
 	}
 
-	PushGPRegs::~PushGPRegs()
+	void PushGPRegs::push(const JitRegGP& _gp)
 	{
-		for (const auto& gp : m_pushedRegs)
-		{
-			m_block.stack().pop(gp);
-		}
+		if(m_block.stack().isUsedFuncArg(_gp))
+			return;
+		PushRegs::push(_gp.as<JitReg64>());
 	}
 
-	PushBeforeFunctionCall::PushBeforeFunctionCall(JitBlock& _block, bool _isJitCall) : m_xmm(_block) , m_gp(_block, _isJitCall)
+	PushBeforeFunctionCall::PushBeforeFunctionCall(JitBlock& _block) : m_xmm(_block) , m_gp(_block)
 	{
 	}
 
@@ -272,6 +277,7 @@ namespace dsp56k
 			return;
 		m_block.lockScratch();
 		m_acquired = true;
+//		m_block.asm_().mov(reg(), asmjit::Imm(0xbadc0debadc0de));
 	}
 
 	void RegScratch::release()
@@ -332,6 +338,11 @@ namespace dsp56k
 		return m_availableRegs.empty();
 	}
 
+	size_t JitRegpool::available() const
+	{
+		return m_availableRegs.size();
+	}
+
 	bool JitRegpool::isInUse(const JitReg& _gp) const
 	{
 		return std::find(m_availableRegs.begin(), m_availableRegs.end(), _gp) == m_availableRegs.end();
@@ -366,6 +377,8 @@ namespace dsp56k
 		m_reg = m_pool.get(this, m_weak);
 		m_block.stack().setUsed(m_reg);
 		m_acquired = true;
+//		if(m_reg.isGp())
+//			m_block.asm_().mov(m_reg.as<JitRegGP>(), asmjit::Imm(0xbadc0debadc0de));
 	}
 
 	void JitScopedReg::release()
@@ -381,11 +394,11 @@ namespace dsp56k
 	{
 	}
 
-	RegXMM::RegXMM(JitBlock& _block, const bool _acquire/* = true*/) : JitScopedReg(_block, _block.xmmPool(), _acquire)
+	RegXMM::RegXMM(JitBlock& _block, const bool _acquire/* = true*/, const bool _weak/* = false*/) : JitScopedReg(_block, _block.xmmPool(), _acquire, _weak)
 	{
 	}
 
-	DSPReg::DSPReg(JitBlock& _block, const JitDspRegPool::DspReg _reg, const bool _read, const bool _write, const bool _acquire)
+	DSPReg::DSPReg(JitBlock& _block, const PoolReg _reg, const bool _read, const bool _write, const bool _acquire)
 	: m_block(_block)
 	, m_read(_read)
 	, m_write(_write)
@@ -451,14 +464,14 @@ namespace dsp56k
 
 	DSPReg& DSPReg::operator=(DSPReg&& _other) noexcept
 	{
-		if (m_dspReg != JitDspRegPool::DspRegInvalid && m_dspReg != _other.m_dspReg && m_acquired)
+		if (m_dspReg != PoolReg::DspRegInvalid && m_dspReg != _other.m_dspReg && m_acquired)
 			release();
 
 		m_read = _other.m_read;
 		m_write = _other.m_write;
 		m_acquired = _other.m_acquired;
 
-		if(m_dspReg != JitDspRegPool::DspRegInvalid && m_dspReg == _other.m_dspReg && m_acquired && _other.m_acquired)
+		if(m_dspReg != PoolReg::DspRegInvalid && m_dspReg == _other.m_dspReg && m_acquired && _other.m_acquired)
 			m_locked |= _other.m_locked;
 		else
 			m_locked = _other.m_locked;

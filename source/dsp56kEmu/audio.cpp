@@ -2,24 +2,31 @@
 
 namespace dsp56k
 {
-	void Audio::readRXimpl(std::array<TWord, 4>& _values)
+	void Audio::terminate()
 	{
-		m_frameSyncDSPStatus = m_frameSyncDSPRead;
+		while(true)
+		{
+			if(!m_audioOutputs.empty())
+				m_audioOutputs.pop_front();
+			else if(!m_audioInputs.full())
+				m_audioInputs.push_back({});
+			else
+				break;
+		}
+	}
 
-		incFrameSync(m_frameSyncDSPRead);
-
+	void Audio::readRXimpl(RxFrame& _values)
+	{
 		m_audioInputs.waitNotEmpty();
 		_values = m_audioInputs.pop_front();
 	}
 
-	void Audio::writeTXimpl(const std::array<TWord, 6>& _values)
+	void Audio::writeTXimpl(const TxFrame& _values)
 	{
-		incFrameSync(m_frameSyncDSPWrite);
-
 		m_audioOutputs.waitNotFull();
 		m_audioOutputs.push_back(_values);
 
-		if (m_callback && m_audioOutputs.size() >= (m_callbackSamples << 1))
+		if (m_audioOutputs.size() >= (m_callbackSamples << 1))
 			m_callback(this);
 	}
 }

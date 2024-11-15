@@ -26,29 +26,29 @@ namespace dsp56k
 		return getFieldInfo(_inst, _field).len > 0;
 	}
 
-	template<Instruction I, Field F> constexpr bool hasField()
+	template<Instruction I, Field F> constexpr bool hasFieldT()
 	{
 		return getFieldInfoCE<I,F>().len > 0;
 	}
 
 	template<Instruction I, Field A, Field B> constexpr bool hasFields()
 	{
-		return hasField<I,A>() && hasField<I,B>();
+		return hasFieldT<I,A>() && hasFieldT<I,B>();
 	}
 
 	template<Instruction I, Field A, Field B> constexpr bool hasAnyField()
 	{
-		return hasField<I,A>() || hasField<I,B>();
+		return hasFieldT<I,A>() || hasFieldT<I,B>();
 	}
 
-	template<Instruction I, Field A, Field B, Field C> constexpr bool hasFields()
+	template<Instruction I, Field A, Field B, Field C> constexpr bool has3Fields()
 	{
-		return hasField<I,A>() && hasField<I,B>() && hasField<I,C>();
+		return hasFieldT<I,A>() && hasFieldT<I,B>() && hasFieldT<I,C>();
 	}
 
 	template<Instruction I, Field A, Field B, Field C> constexpr bool hasAnyField()
 	{
-		return hasField<I,A>() || hasField<I,B>() || hasField<I,C>();
+		return hasFieldT<I,A>() || hasFieldT<I,B>() || hasFieldT<I,C>();
 	}
 
 	static constexpr TWord getFieldValue(const FieldInfo& _fi, TWord _memoryValue)
@@ -275,10 +275,11 @@ namespace dsp56k
 		static const OpcodeInfo& getOpcodeInfoAt(size_t _index);
 
 		uint32_t getOpcodeLength(TWord _op) const;
-		uint32_t getOpcodeLength(TWord _op, Instruction _instA, Instruction _instB) const;
+		static uint32_t getOpcodeLength(TWord _op, Instruction _instA, Instruction _instB);
 		bool writesToPMemory(TWord _op) const;
 		uint32_t getInstructionTypes(TWord _op, Instruction& _a, Instruction& _b) const;
-		bool getRegisters(RegisterMask& _written, RegisterMask& _read, TWord _opA, TWord _opB) const;
+		bool getRegisters(RegisterMask& _written, RegisterMask& _read, TWord _opA) const;
+		static bool getRegisters(RegisterMask& _written, RegisterMask& _read, TWord _opA, Instruction _instA, Instruction _instB);
 		static uint32_t getFlags(Instruction _instA, Instruction _instB);
 		bool getMemoryAddress(TWord& _addr, EMemArea& _area, TWord opA, TWord opB) const;
 	private:
@@ -302,17 +303,17 @@ namespace dsp56k
 		return static_cast<EMemArea>(getFieldValue<I,Field_S>(_op) + MemArea_X);
 	}
 	
-	template <Instruction Inst, typename std::enable_if<hasField<Inst, Field_aaaaaaaaaaaa>()>::type* = nullptr> TWord getEffectiveAddress(const TWord op)
+	template <Instruction Inst, std::enable_if_t<hasFieldT<Inst, Field_aaaaaaaaaaaa>()>* = nullptr> TWord getEffectiveAddress(const TWord op)
 	{
 		return getFieldValue<Inst, Field_aaaaaaaaaaaa>(op);
 	}
 
-	template <Instruction Inst, typename std::enable_if<!hasAnyField<Inst, Field_a, Field_RRR>() && hasField<Inst, Field_aaaaaa>()>::type* = nullptr> TWord getEffectiveAddress(const TWord op)
+	template <Instruction Inst, std::enable_if_t<!hasAnyField<Inst, Field_a, Field_RRR>() && hasFieldT<Inst, Field_aaaaaa>()>* = nullptr> TWord getEffectiveAddress(const TWord op)
 	{
 		return getFieldValue<Inst, Field_aaaaaa>(op);
 	}
 
-	template <Instruction Inst, typename std::enable_if<hasFields<Inst, Field_aaaa, Field_aaaaa>()>::type* = nullptr> int getRelativeAddressOffset(const TWord op)
+	template <Instruction Inst, std::enable_if_t<hasFields<Inst, Field_aaaa, Field_aaaaa>()>* = nullptr> int getRelativeAddressOffset(const TWord op)
 	{
 		const TWord a = getFieldValue<Inst,Field_aaaa, Field_aaaaa>(op);
 		return signextend<int,9>( a );

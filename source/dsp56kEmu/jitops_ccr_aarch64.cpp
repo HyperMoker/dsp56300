@@ -12,11 +12,9 @@ namespace dsp56k
 {
 	void JitOps::ccr_clear(CCRMask _mask)
 	{
-		m_ccrWritten |= _mask;
-
+		ccr_clearDirty(_mask);
 		// TODO: by using BIC, we should be able to encode any kind of SR bits, this version fails on ARMv8 with "invalid immediate" if we specify more than one bit. But BIC with "Gp, Gp, Imm" is not available (yet?)
 		m_asm.and_(m_dspRegs.getSR(JitDspRegs::ReadWrite), asmjit::Imm(~_mask));
-		ccr_clearDirty(_mask);
 	}
 
 	void JitOps::ccr_getBitValue(const JitRegGP& _dst, CCRBit _bit)
@@ -142,7 +140,7 @@ namespace dsp56k
 		{
 			// build shift value:
 			// const auto offset = sr_val_noCache(SRB_S0) - sr_val_noCache(SRB_S1);
-			const ShiftReg shift(m_block);
+			ShiftReg shift(m_block);
 			sr_getBitValue(shift, SRB_S0);
 			{
 				const RegGP s1(m_block);
@@ -153,6 +151,8 @@ namespace dsp56k
 			const RegGP r(m_block);
 			m_asm.lsr(r, _alu, asmjit::Imm(46));
 			m_asm.shr(r, shift.get());	// FIXME: how can this work? shift might be negative if SRB_S1 is one but SRB_S0 is zero
+
+			shift.release();
 
 			m_asm.eon(r, r, r, asmjit::arm::lsr(1));
 			copyBitToCCR(r, 0, CCRB_U);

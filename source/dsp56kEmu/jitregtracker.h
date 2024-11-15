@@ -22,6 +22,7 @@ namespace dsp56k
 		void put(JitScopedReg* _scopedReg, bool _weak);
 		JitReg get(JitScopedReg* _scopedReg, bool _weak);
 		bool empty() const;
+		size_t available() const;
 		bool isInUse(const JitReg& _gp) const;
 
 		size_t capacity() const { return m_capacity; }
@@ -66,7 +67,7 @@ namespace dsp56k
 
 		const JitReg& get() const { assert(isValid()); return m_reg; }
 
-		JitBlock& block() { return m_block; }
+		JitBlock& block() const { return m_block; }
 
 	private:
 		JitReg m_reg;
@@ -94,7 +95,7 @@ namespace dsp56k
 	class RegXMM : public JitScopedReg
 	{
 	public:
-		RegXMM(JitBlock& _block, bool _acquire = true);
+		RegXMM(JitBlock& _block, bool _acquire = true, bool _weak = false);
 
 		const JitReg128& get() const { return JitScopedReg::get().as<JitReg128>(); }
 		operator const JitReg128& () const { return get(); }
@@ -103,7 +104,7 @@ namespace dsp56k
 	class DSPReg
 	{
 	public:
-		DSPReg(JitBlock& _block, JitDspRegPool::DspReg _reg, bool _read = true, bool _write = true, bool _acquire = true);
+		DSPReg(JitBlock& _block, PoolReg _reg, bool _read = true, bool _write = true, bool _acquire = true);
 		DSPReg(DSPReg&& _other) noexcept;
 		~DSPReg();
 
@@ -124,7 +125,7 @@ namespace dsp56k
 		bool read() const { return m_read; }
 		bool write() const { return m_write; }
 
-		JitDspRegPool::DspReg dspReg() const { return m_dspReg; }
+		PoolReg dspReg() const { return m_dspReg; }
 
 		JitBlock& block() { return m_block; }
 
@@ -137,7 +138,7 @@ namespace dsp56k
 		bool m_write;
 		bool m_acquired;
 		bool m_locked;
-		JitDspRegPool::DspReg m_dspReg;
+		PoolReg m_dspReg;
 		JitRegGP m_reg;
 	};
 
@@ -160,7 +161,9 @@ namespace dsp56k
 		void acquire();
 		void release();
 
-		bool acquired() const { return m_dspReg != JitDspRegPool::DspRegInvalid; }
+		bool acquired() const { return m_dspReg != PoolReg::DspRegInvalid; }
+
+		JitBlock& block() const { return m_block; }
 
 		DSPRegTemp& operator = (const DSPRegTemp& _other) = delete;
 		DSPRegTemp& operator = (DSPRegTemp&& _other) noexcept
@@ -169,14 +172,14 @@ namespace dsp56k
 			m_dspReg = _other.m_dspReg;
 
 			_other.m_reg.reset();
-			_other.m_dspReg = JitDspRegPool::DspRegInvalid;
+			_other.m_dspReg = PoolReg::DspRegInvalid;
 
 			return *this;
 		}
 
 	private:
 		JitBlock& m_block;
-		JitDspRegPool::DspReg m_dspReg = JitDspRegPool::DspRegInvalid;
+		PoolReg m_dspReg = PoolReg::DspRegInvalid;
 		JitRegGP m_reg;
 	};
 
@@ -212,6 +215,7 @@ namespace dsp56k
 		const bool m_read;
 		const bool m_write;
 		const TWord m_aluIndex;
+		bool m_lockedByUs = false;
 	};
 
 	class PushGP
@@ -244,50 +248,87 @@ namespace dsp56k
 	class ShiftReg : public PushGP
 	{
 	public:
-		ShiftReg(JitBlock& _block) : PushGP(_block, asmjit::x86::rcx) {}
+		explicit ShiftReg(JitBlock& _block);
+		~ShiftReg();
 	};
 #else
 	using ShiftReg = RegGP;
 #endif
 
-	class PushXMM
+	class ShiftTemp
 	{
 	public:
-		PushXMM(JitBlock& _block, uint32_t _xmmIndex);
-		~PushXMM();
-		bool isPushed() const { return m_isLoaded; }
+		ShiftTemp(JitBlock& _block, bool _acquire) : m_block(_block)
+		{
+			if(_acquire)
+				acquire();
+		}
+
+		~ShiftTemp()
+		{
+			release();
+		}
+
+		ShiftTemp(const ShiftTemp&) = delete;
+		ShiftTemp(ShiftTemp&& _source) noexcept : m_block(_source.m_block), m_reg(std::move(_source.m_reg))
+		{
+		}
+
+		ShiftTemp& operator = (const ShiftTemp&) = delete;
+		ShiftTemp& operator = (ShiftTemp&& _source) noexcept
+		{
+			m_reg = std::move(_source.m_reg);
+			return *this;
+		}
+
+		void acquire();
+		void release();
+		bool isValid() const { return m_reg != nullptr; }
+
+		JitReg64 get() const
+		{
+			return isValid() ? m_reg->get() : JitReg64();
+		}
 
 	private:
 		JitBlock& m_block;
-		uint32_t m_xmmIndex;
-		bool m_isLoaded;
+		std::unique_ptr<ShiftReg> m_reg;
 	};
 
-	class PushXMMRegs
+	template<typename T>
+	class PushRegs
+	{
+	public:
+		PushRegs(JitBlock& _block) : m_block(_block) {}
+		~PushRegs();
+
+		void push(const T& _reg);
+
+	protected:
+		JitBlock& m_block;
+	private:
+		std::list<T> m_pushedRegs;
+	};
+
+	class PushXMMRegs : PushRegs<JitReg128>
 	{
 	public:
 		PushXMMRegs(JitBlock& _block);
-		~PushXMMRegs();
-
-	private:
-		JitBlock& m_block;
-		std::list<JitReg128> m_pushedRegs;
 	};
 
-	class PushGPRegs
+	class PushGPRegs : PushRegs<JitReg64>
 	{
 	public:
-		PushGPRegs(JitBlock& _block, bool _isJitCall);
-		~PushGPRegs();
+		PushGPRegs(JitBlock& _block);
+
 	private:
-		JitBlock& m_block;
-		std::list<JitRegGP> m_pushedRegs;
+		void push(const JitRegGP& _gp);
 	};
 
 	class PushBeforeFunctionCall
 	{
 	public:
-		PushBeforeFunctionCall(JitBlock& _block, bool _isJitCall);
+		PushBeforeFunctionCall(JitBlock& _block);
 
 		PushXMMRegs m_xmm;
 		PushGPRegs m_gp;
@@ -297,13 +338,9 @@ namespace dsp56k
 	{
 	public:
 		explicit RegScratch(JitBlock& _block, bool _acquire = true);
-		RegScratch(RegScratch&& _other) noexcept : m_block(_other.m_block)
+		RegScratch(RegScratch&& _other) noexcept : m_block(_other.m_block), m_acquired(_other.m_acquired)
 		{
-			if(_other.isValid())
-			{
-				_other.release();
-				acquire();
-			}
+			_other.m_acquired = false;
 		}
 		explicit RegScratch(const RegScratch&) = delete;
 
@@ -311,7 +348,9 @@ namespace dsp56k
 
 		void acquire();
 		void release();
-		
+
+		JitBlock& block() const { return m_block; }
+
 		RegScratch& operator = (RegScratch&& _other) noexcept
 		{
 			if(_other.isValid())

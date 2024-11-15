@@ -6,6 +6,7 @@
 #include "jithelper.h"
 
 #include "jitops_alu.inl"
+#include "opcodecycles.h"
 
 #include "opcodes.h"
 
@@ -254,14 +255,14 @@ namespace dsp56k
 		&JitOps::op_Wait							// Wait 
 	};
 
-	JitOps::JitOps(JitBlock& _block, JitBlockRuntimeData& _brt, bool _fastInterrupt/* = false*/)
+	JitOps::JitOps(JitBlock& _block, JitBlockRuntimeData& _brt, const FastInterruptMode _fastInterruptMode/* = FastInterruptMode::None*/)
 	: m_block(_block)
 	, m_blockRuntimeData(_brt)
 	, m_opcodes(_block.dsp().opcodes())
 	, m_dspRegs(_block.regs())
 	, m_asm(_block.asm_())
 	, m_ccrDirty(_block.regs().ccrDirtyFlags())
-	, m_fastInterrupt(_fastInterrupt)
+	, m_fastInterruptMode(_fastInterruptMode)
 	{
 	}
 
@@ -409,6 +410,18 @@ namespace dsp56k
 	{
 	}
 
+	uint32_t JitOps::calcCycles(const TWord _pc) const
+	{
+		TWord opA;
+		TWord opB;
+		m_block.dsp().memory().getOpcode(_pc, opA, opB);
+		Instruction instA;
+		Instruction instB;
+		m_block.dsp().opcodes().getInstructionTypes(opA, instA, instB);
+
+		return dsp56k::calcCycles(instA, instB, _pc, opA, m_block.dsp().memory().getBridgedMemoryAddress(), 1);
+	}
+
 	void JitOps::errNotImplemented(TWord op)
 	{
 		assert(0 && "instruction not implemented");
@@ -475,23 +488,21 @@ namespace dsp56k
 		// decrement SP twice, restoring old loop settings
 		decSP();
 
-		m_dspRegs.getSS(r64(r));
+		{
+			DspValue lc(m_block, PoolReg::DspLC, false, true);
+			DspValue la(m_block, PoolReg::DspLA, false, true);
 
-		const auto lc = m_dspRegs.getLC(JitDspRegs::Write);
-#ifdef HAVE_ARM64
-		m_asm.ubfx(r64(lc), r64(r), asmjit::Imm(0), asmjit::Imm(24));
-#else
-		m_asm.mov(r32(lc), r32(r));
-		m_asm.and_(r32(lc), asmjit::Imm(0xffffff));
-#endif
+			m_dspRegs.getSS(r64(lc));
 
-		const auto la = m_dspRegs.getLA(JitDspRegs::Write);
 #ifdef HAVE_ARM64
-		m_asm.ubfx(r64(la), r64(r), asmjit::Imm(24), asmjit::Imm(24));
+			m_asm.ubfx(r64(la), r64(lc), asmjit::Imm(24), asmjit::Imm(24));
+			m_asm.ubfx(r64(lc), r64(lc), asmjit::Imm(0), asmjit::Imm(24));
 #else
-		m_asm.ror(r64(la), r64(r), 24);
-		m_asm.and_(r32(la), asmjit::Imm(0xffffff));
+			m_asm.ror(r64(la), r64(lc), 24);
+			m_asm.and_(r32(la), asmjit::Imm(0xffffff));
+			m_asm.and_(r32(lc), asmjit::Imm(0xffffff));
 #endif
+		}
 
 		decSP();
 
@@ -514,6 +525,11 @@ namespace dsp56k
 		_dsp->op_Debug(op);
 	}
 
+	void callDSPWait(DSP* const _dsp, const TWord op)
+	{
+		_dsp->op_Wait(op);
+	}
+
 	void JitOps::op_Debug(TWord op)
 	{
 		// make sure that the debugger sees all latest register values correctly
@@ -532,7 +548,15 @@ namespace dsp56k
 
 	void JitOps::op_Wait(TWord op)
 	{
-		op_Stop(op);
+		// TODO use this for idle processng
+		callDSPFunc(&callDSPWait, op);
+		/*
+#ifdef HAVE_X86_64
+		m_asm.nop(ptr(r32(regDspPtr), static_cast<int32_t>(m_pcCurrentOp)));
+#else
+		m_asm.nop();
+#endif
+*/
 	}
 
 	void JitOps::op_Do_ea(TWord op)
@@ -604,29 +628,42 @@ namespace dsp56k
 		do_end();
 	}
 
-	template<bool BackupCCR> void JitOps::op_Ifcc(TWord op)
+	template<bool BackupCCR> void JitOps::op_Ifcc(const TWord op)
 	{
+		// preload all registers that the alu op needs to ensure nothing is loaded/unloaded within the if block
+		const auto* oiAlu = m_opcodes.findParallelAluOpcodeInfo(op);
+
+		RegisterMask regsWritten;
+		RegisterMask regsRead;
+
+		getRegisters(regsWritten, regsRead, oiAlu->getInstruction(), op);
+
+		// remove SR because we lock it anyway below
+		reinterpret_cast<uint64_t&>(regsWritten) &= ~static_cast<uint64_t>(RegisterMask::SR);
+		reinterpret_cast<uint64_t&>(regsRead) &= ~static_cast<uint64_t>(RegisterMask::SR);
+
+		// we need to read registers that are write-only beause the write is conditional. Otherwise this would discard the current register values if the write is not happening and writes back crap to memory
+		regsRead |= regsWritten;
+
 		const TWord cccc = getFieldValue<Ifcc,Field_CCCC>(op);
 
-		const DSPReg sr(m_block, JitDspRegPool::DspSR, true, false);
+		const DSPReg sr(m_block, PoolReg::DspSR, true, false);
+
+		const auto lockedRegs = getBlock().dspRegPool().lock(regsRead, regsWritten);
 
 		If(m_block, m_blockRuntimeData, [&](auto _toFalse)
 		{
-#ifdef HAVE_ARM64
 			const auto cc = decode_cccc(cccc);
-			m_block.dspRegPool().releaseNonLocked();
+#ifdef HAVE_ARM64
 			m_asm.b(reverseCC(cc), _toFalse);
 #else
-			const auto cc = decode_cccc(cccc);
-			m_block.dspRegPool().releaseNonLocked();
 			m_asm.j(reverseCC(cc), _toFalse);
 #endif
 		}, [&]()
 		{
-			auto emitAluOp = [&](const TWord _op)
+			auto emitAluOp = [&]
 			{
-				const auto* oiAlu = m_opcodes.findParallelAluOpcodeInfo(_op);
-				emit(oiAlu->getInstruction(), _op);
+				emit(oiAlu->getInstruction(), op);
 			};
 
 			if constexpr(BackupCCR)
@@ -640,12 +677,12 @@ namespace dsp56k
 				const auto dirtyBackup = dirty;
 
 				m_disableCCRUpdates = true;
-				emitAluOp(op);
+				emitAluOp();
 				m_disableCCRUpdates = false;
 
 				dirty = dirtyBackup;
 
-				if(m_block.dspRegPool().isWritten(JitDspRegPool::DspSR))
+				if(m_block.dspRegPool().isWritten(PoolReg::DspSR))
 				{
 					const RegGP r(m_block);
 					m_asm.movd(r32(r.get()), ccrBackup);
@@ -658,9 +695,11 @@ namespace dsp56k
 			}
 			else
 			{
-				emitAluOp(op);
+				emitAluOp();
 			}
-		}, !BackupCCR);
+		}, [] {}, false, !BackupCCR, false);
+
+		getBlock().dspRegPool().unlock(lockedRegs);
 	}
 
 	void JitOps::op_Lua_ea(const TWord _op)
@@ -726,19 +765,32 @@ namespace dsp56k
 			callDSPFunc(&callDSPPlock, r64(ea.get()));
 	}
 
-	void JitOps::jmp(DspValue& _absAddr)
+	void JitOps::jmp(const DspValue& _absAddr)
 	{
 		m_dspRegs.setPC(_absAddr);
 	}
 
-	void JitOps::jsr(DspValue& _absAddr)
+	void JitOps::jsr(const DspValue& _absAddr)
 	{
 		pushPCSR();
 		jmp(_absAddr);
 
-		if (m_fastInterrupt)
+		if (m_fastInterruptMode != FastInterruptMode::None)
 		{
-			const auto sr = m_dspRegs.getSR(JitDspRegs::ReadWrite);
+			DspValue srVal(m_block, PoolReg::DspSR, true, true);
+			const auto sr = r32(srVal);
+
+			const SkipLabel skip(m_asm);
+
+			if(m_fastInterruptMode == FastInterruptMode::Dynamic)
+			{
+				const RegGP processingMode(m_block);
+				getDspProcessingMode(r64(processingMode));
+
+				m_asm.cmp(processingMode, DSP::ProcessingMode::FastInterrupt);
+				m_asm.jnz(skip);
+			}
+
 #ifdef HAVE_ARM64
 			m_asm.and_(sr, asmjit::Imm(~(SR_S1 | SR_S0)));
 			m_asm.and_(sr, asmjit::Imm(~(SR_SA)));
@@ -750,7 +802,7 @@ namespace dsp56k
 		}
 	}
 
-	void JitOps::jmp(TWord _absAddr)
+	void JitOps::jmp(const TWord _absAddr)
 	{
 		DspValue r(m_block, _absAddr, DspValue::Immediate24);
 		jmp(r);
@@ -801,6 +853,9 @@ namespace dsp56k
 		{
 			// rep nop => do nothing
 			m_blockRuntimeData.getEncodedInstructionCount() += _lc;
+
+			// Note: We use _lc minus one because the operation itself was already counted once in JitBlock.cpp, where it just counts every translated op already
+			m_blockRuntimeData.getEncodedCycleCount() += (_lc-1) * dsp56k::calcCycles(Nop, m_pcCurrentOp, 0, 0, 0);
 			m_opSize++;
 			return;
 		}
@@ -826,20 +881,32 @@ namespace dsp56k
 
 		_lc.release();
 
+		const auto opSize = m_opSize;				// remember old op size as it gets overwritten by the child instruction
+		const auto pc = m_pcCurrentOp + m_opSize;
+
+		const auto repBodyCycles = calcCycles(pc);
+
 		if(hasImmediateOperand)
 		{
 			m_blockRuntimeData.getEncodedInstructionCount() += lcImmediateOperand;
+			m_blockRuntimeData.getEncodedCycleCount() += (lcImmediateOperand-1) * repBodyCycles;
 		}
 		else
 		{
 			const auto lc = r32(m_dspRegs.getLC(JitDspRegs::Read));
-
 			m_block.increaseInstructionCount(lc);
+
+			const RegGP temp(m_block);
+			m_asm.mov(r32(temp), asmjit::Imm(repBodyCycles));
+#ifdef HAVE_ARM64
+			m_asm.smull(r64(temp), r32(temp), r32(lc));
+#else
+			m_asm.imul(r32(temp), r32(lc));
+#endif
+			m_asm.sub(r32(temp), repBodyCycles);
+			m_block.increaseCycleCount(r32(temp));
 		}
 
-		const auto opSize = m_opSize;
-		const auto pc = m_pcCurrentOp + m_opSize;	// remember old op size as it gets overwritten by the child instruction
-		
 		const auto loopCycle = [&](bool _compare = true, TWord compareValue = 0)
 		{
 			const auto oldPushedRegCount = m_block.stack().pushedRegCount();
@@ -881,8 +948,8 @@ namespace dsp56k
 				const auto loadedAndWritten = loadedDuringCycle & written;
 				const auto spilledAndWritten = spilledDuringCycle & written;
 
-				assert(loadedAndWritten == JitDspRegPool::DspRegFlags::None);
-				assert(spilledAndWritten == JitDspRegPool::DspRegFlags::None);
+				assert(loadedAndWritten == DspRegFlags::None);
+				assert(spilledAndWritten == DspRegFlags::None);
 
 				m_block.dspRegPool().releaseByFlags(loadedAndWritten);
 				m_block.dspRegPool().releaseByFlags(spilledAndWritten);
@@ -994,4 +1061,23 @@ namespace dsp56k
 	{
 		callDSPFunc(&callDSPReset, op);
 	}
+
+	bool JitOps::isPeriphAddress(const TWord _addr) const
+	{
+		return _addr >= getPeriphStartAddr();
+	}
+
+	TWord JitOps::getPeriphStartAddr() const
+	{
+		const auto* mode = m_block.getMode();
+		if(!mode)
+		{
+			assert(!m_block.getConfig().support16BitSCMode);
+			return XIO_Reserved_High_First;
+		}
+		if(mode->testSR(SRB_SC))
+			return XIO_Reserved_High_First_16;
+		return XIO_Reserved_High_First;
+	}
+
 }

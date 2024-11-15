@@ -2,10 +2,12 @@
 
 #include "jitdspregpool.h"
 #include "jitregtracker.h"
-#include "jitregtypes.h"
 
 namespace dsp56k
 {
+	class JitBlock;
+	class DSPReg;
+
 	class DspValue
 	{
 	public:
@@ -31,23 +33,25 @@ namespace dsp56k
 			Temp8
 		};
 
-		explicit DspValue(JitBlock& _block, bool _usePooledTemp = false, bool _useScratchTemp = false);
+		explicit DspValue(JitBlock& _block, bool _usePooledTemp = false, bool _useScratchTemp = false, bool _useShiftTemp = false);
 		explicit DspValue(JitBlock& _block, int64_t _value, Type _type = Immediate56);
 		explicit DspValue(JitBlock& _block, int _value, Type _type = Immediate24);
 		explicit DspValue(JitBlock& _block, TWord _value, Type _type = Immediate24) : DspValue(_block, static_cast<int>(_value), _type) {}
-		explicit DspValue(JitBlock& _block, JitDspRegPool::DspReg _reg, bool _read, bool _write);
+		explicit DspValue(JitBlock& _block, PoolReg _reg, bool _read, bool _write);
 
-		explicit DspValue(JitBlock& _block, JitDspRegPool::DspReg _reg, bool _read, bool _write, const TWord _regOffset)
-			: DspValue(_block, static_cast<JitDspRegPool::DspReg>(_reg + _regOffset), _read, _write)
+		explicit DspValue(JitBlock& _block, PoolReg _reg, bool _read, bool _write, const TWord _regOffset)
+			: DspValue(_block, static_cast<PoolReg>(_reg + _regOffset), _read, _write)
 		{
 		}
 
-		explicit DspValue(DSPReg&& _dspReg);
 		DspValue(const DspValue&) = delete;
 
-		DspValue(DspValue&& other) noexcept;
+		DspValue(DspValue&& _other) noexcept;
 
+		explicit DspValue(DSPReg&& _dspReg);
+		explicit DspValue(DSPRegTemp&& _dspReg, Type _type);
 		explicit DspValue(RegGP&& _existingTemp, Type _type);
+		explicit DspValue(RegScratch&& _existingTemp, Type _type);
 
 		void set(const JitRegGP& _reg, Type _type);
 		void set(const int32_t& _value, Type _type);
@@ -109,7 +113,7 @@ namespace dsp56k
 		void copyTo(const JitRegGP& _dst, TWord _dstBitCount) const;
 		void copyTo(const DspValue& _dst) const;
 
-		bool isDspReg(JitDspRegPool::DspReg _reg) const;
+		bool isDspReg(PoolReg _reg) const;
 		void write();
 		void convertTo56(const JitReg64& _dst) const;
 		void convertTo56(const JitRegGP& _dst, const JitRegGP& _src) const;
@@ -121,7 +125,7 @@ namespace dsp56k
 		bool isTemp() const;
 		void release();
 
-		static TWord getBitCount(JitDspRegPool::DspReg _reg);
+		static TWord getBitCount(PoolReg _reg);
 		static TWord getBitCount(Type _reg);
 
 		static Type getDspRegTypeFromBitSize(TWord _bitSize);
@@ -134,6 +138,7 @@ namespace dsp56k
 
 		void setUsePooledTemp(bool _pooled);
 		void setUseScratchTemp(bool _scratch);
+		void setUseShiftTemp(bool _shift);
 
 		void reinterpretAs(const Type _type, const TWord _bitCount)
 		{
@@ -144,7 +149,13 @@ namespace dsp56k
 	private:
 		JitReg64 temp() const
 		{
-			return m_usePooledTemp ? m_pooledTemp.get() : (m_useScratchTemp ? m_scratch.get() : m_gpTemp.get());
+			if(m_usePooledTemp)
+				return m_pooledTemp.get();
+			if(m_useScratchTemp)
+				return m_scratch.get();
+			if(m_useShiftTemp)
+				return m_shift.get();
+			return m_gpTemp.get();
 		}
 
 		void acquireTemp();
@@ -156,6 +167,8 @@ namespace dsp56k
 				return m_pooledTemp.acquired();
 			if(m_useScratchTemp)
 				return m_scratch.isValid();
+			if(m_useShiftTemp)
+				return m_shift.isValid();
 			return m_gpTemp.isValid();
 		}
 
@@ -163,10 +176,12 @@ namespace dsp56k
 
 		bool m_usePooledTemp = false;
 		bool m_useScratchTemp = false;
+		bool m_useShiftTemp = false;
 
 		RegGP m_gpTemp;
 		DSPRegTemp m_pooledTemp;
 		RegScratch m_scratch;
+		ShiftTemp m_shift;
 		DSPReg m_dspReg;
 		JitRegGP m_reg;
 
@@ -175,14 +190,14 @@ namespace dsp56k
 		int64_t m_immediate = 0;
 	};
 
-	static DspValue makeDspValueAguReg(JitBlock& _block, const JitDspRegPool::DspReg _aguBaseReg, const TWord _aguRegIndex, const bool _read = true, const bool _write = false)
+	static DspValue makeDspValueAguReg(JitBlock& _block, const PoolReg _aguBaseReg, const TWord _aguRegIndex, const bool _read = true, const bool _write = false)
 	{
-		return DspValue(_block, static_cast<JitDspRegPool::DspReg>(_aguBaseReg + _aguRegIndex), _read, _write);
+		return DspValue(_block, static_cast<PoolReg>(_aguBaseReg + _aguRegIndex), _read, _write);
 	}
 
 	static DspValue makeDspValueRegR(JitBlock& _block, const TWord _aguRegRindex, const bool _read = true, const bool _write = false)
 	{
-		return makeDspValueAguReg(_block, JitDspRegPool::DspR0, _aguRegRindex, _read, _write);
+		return makeDspValueAguReg(_block, PoolReg::DspR0, _aguRegRindex, _read, _write);
 	}
 }
 

@@ -27,6 +27,12 @@
 #include "jit.h"
 
 #if 0
+#	define LOGJITPC(PC)		LOG(HEX(reinterpret_cast<uint64_t>(this)) << " exec @ " << HEX(PC))
+#else
+#	define LOGJITPC(PC)		{}
+#endif
+
+#if 0
 #	define LOGSC(F)	logSC(F)
 #else
 #	define LOGSC(F)	{}
@@ -41,10 +47,6 @@ namespace dsp56k
 
 	Jumptable g_jumptable;
 
-	void dspExecNoPendingInterrupts(DSP* _dsp)
-	{
-		_dsp->execNoPendingInterrupts();
-	}
 	void dspExecDefaultPreventInterrupt(DSP* _dsp)
 	{
 		_dsp->execDefaultPreventInterrupt();
@@ -56,9 +58,26 @@ namespace dsp56k
 	{
 		_dsp->execInterrupts();
 	}
-	void dspTryExecInterrupts(DSP* _dsp)
+	template <typename Ta, typename Tb> void dspExecPeripherals(DSP* _dsp)
 	{
-		_dsp->tryExecInterrupts();
+		_dsp->execPeriph<Ta, Tb>();
+	}
+
+	template <typename Ta, typename Tb> DSP::TInterruptFunc findExecPeripheralsFuncT(IPeripherals* _pX, IPeripherals* _pY)
+	{
+		if(dynamic_cast<Ta*>(_pX) && dynamic_cast<Tb*>(_pY))
+			return &dspExecPeripherals<Ta, Tb>;
+		return nullptr;
+	}
+
+	DSP::TInterruptFunc findExecPeripheralsFunc(IPeripherals* _pX, IPeripherals* _pY)
+	{
+		if(const auto func = findExecPeripheralsFuncT<Peripherals56362, PeripheralsNop>(_pX, _pY))		return func;
+		if(const auto func = findExecPeripheralsFuncT<Peripherals56362, Peripherals56367>(_pX, _pY))	return func;
+		if(const auto func = findExecPeripheralsFuncT<Peripherals56303, PeripheralsNop>(_pX, _pY))		return func;
+		if(const auto func = findExecPeripheralsFuncT<PeripheralsNop, PeripheralsNop>(_pX, _pY))		return func;
+		assert(false && "Peripherals configuration is not supported");
+		return nullptr;
 	}
 
 	// _____________________________________________________________________________
@@ -68,8 +87,9 @@ namespace dsp56k
 		: mem(_memory)
 		, perif({_pX, _pY})
 		, pcCurrentInstruction(0xffffff)
+		, m_execPeripheralsFunc(findExecPeripheralsFunc(_pX, _pY))
 		, m_jit(*this)
-		, m_interruptFunc(&dspExecNoPendingInterrupts)
+		, m_interruptFunc(m_execPeripheralsFunc)
 		, m_disasm(m_opcodes)
 	{
 		assert(_pX != _pY && "cannot use the same peripherals twice");
@@ -137,6 +157,7 @@ namespace dsp56k
 		reg.omr = TReg24(int(0));
 		
 		m_instructions = 0;
+		m_cycles = 0;
 		m_jit.resetHW();
 	}
 
@@ -145,9 +166,6 @@ namespace dsp56k
 	//
 	void DSP::exec()
 	{
-		// we do not support 16-bit compatibility mode
-		assert( (reg.sr.var & SR_SC) == 0 && "16 bit compatibility mode is not supported");
-
 		if(g_useJIT)
 		{
 #if 0
@@ -170,8 +188,10 @@ namespace dsp56k
 			if(m_debugger)
 				m_debugger->onExec(getPC().var);
 #endif
-
-			m_jit.exec(getPC().var);
+			const auto pc = getPC().toWord();
+			LOGJITPC(pc);
+			m_jitEntries[pc](&m_jit, pc);
+//			m_jit.exec(pc);
 		}
 		else
 		{
@@ -204,46 +224,20 @@ namespace dsp56k
 		}
 	}
 
-	void DSP::execPeriph()
-	{
-		const auto diff = getRemainingPeripheralsCycles();
-
-		if (diff > 0 && diff < PeripheralsProcessingStepSize)
-			return;
-
-		m_peripheralCounter += PeripheralsProcessingStepSize;
-
-		perif[0]->exec();
-		perif[1]->exec();
-	}
-
-	void DSP::tryExecInterrupts()
-	{
-		if (!m_pendingInterrupts.empty())
-			execInterrupts();
-	}
-
 	void DSP::execInterrupts()
 	{
-		// note: holding a ref and accessing the item after removal works because we operate on a ring buffer
-		const auto& interrupt = m_pendingInterrupts.front();
+		const auto interrupt = m_pendingInterrupts.front();
 
-		const auto vba = interrupt.vba;
-
-		if(isInterruptMasked(vba))
-			return;
-
-		if(interrupt.vba >= Vba_End)
+		if(interrupt >= Vba_End)
 		{
-			interrupt.func();
+			m_customInterrupts[interrupt - Vba_End]();
 
 			{
-				std::lock_guard lock(m_mutexInsertPendingInterrupt);
 				m_processingMode = Default;
 				m_pendingInterrupts.pop_front();
 
 				if (m_pendingInterrupts.empty())
-					m_interruptFunc = &dspExecNoPendingInterrupts;
+					m_interruptFunc = m_execPeripheralsFunc;
 				else
 					m_interruptFunc = &dspExecInterrupts;
 			}
@@ -251,9 +245,13 @@ namespace dsp56k
 			return;
 		}
 
+		const auto vba = interrupt;
+
+		if(isInterruptMasked(vba))
+			return;
+
 		// it is important that the processing mode is switched first before popping the vector to prevent a possible race condition in hasPendingInterrupt()
 		{
-			std::lock_guard lock(m_mutexInsertPendingInterrupt);
 			m_processingMode = FastInterrupt;
 			m_pendingInterrupts.pop_front();
 		}
@@ -273,11 +271,15 @@ namespace dsp56k
 
 		if(g_useJIT)
 		{
-			m_jit.exec(vba);
+			LOGJITPC(vba);
+			const auto pc = getPC();
+			m_jitEntries[vba](&m_jit, vba);
+//			m_jit.exec(vba);
 			if(m_processingMode != LongInterrupt)
 			{
 				m_processingMode = DefaultPreventInterrupt;
 				m_interruptFunc = &dspExecDefaultPreventInterrupt;
+				setPC(pc);
 			}
 			else
 			{
@@ -340,17 +342,18 @@ namespace dsp56k
 	{
 		m_processingMode = Default;
 
-		std::lock_guard lock(m_mutexInsertPendingInterrupt);
-
 		if(m_pendingInterrupts.empty())
-			m_interruptFunc = &dspExecNoPendingInterrupts;
+			m_interruptFunc = m_execPeripheralsFunc;
 		else
 			m_interruptFunc = &dspExecInterrupts;
 	}
 
-	void DSP::execNoPendingInterrupts()
+	void DSP::setPeriph(const size_t _index, IPeripherals* _periph)
 	{
-		execPeriph();
+		perif[_index] = _periph;
+		_periph->setDSP(this);
+
+		m_execPeripheralsFunc = findExecPeripheralsFunc(perif[0], perif[1]);
 	}
 
 	void DSP::terminate()
@@ -1090,7 +1093,7 @@ namespace dsp56k
 
 	bool DSP::memWritePeriph( EMemArea _area, TWord _offset, TWord _value )
 	{
-		perif[_area - MemArea_X]->write(_offset, _value );
+		perif[_area - MemArea_X]->write(_offset | 0xff0000, _value );
 		return true;
 	}
 	bool DSP::memWritePeriphFFFF80( EMemArea _area, TWord _offset, TWord _value )
@@ -1150,7 +1153,7 @@ namespace dsp56k
 
 	TWord DSP::memReadPeriph(EMemArea _area, TWord _offset, Instruction _inst) const
 	{
-		return perif[_area - MemArea_X]->read(_offset, _inst);
+		return perif[_area - MemArea_X]->read(_offset | 0xff0000, _inst);
 	}
 	TWord DSP::memReadPeriphFFFF80(EMemArea _area, TWord _offset, Instruction _inst) const
 	{
@@ -1271,14 +1274,14 @@ namespace dsp56k
 	{
 		reg.m[which].var = val;
 
-		if (val == 0xffffff)	// Linear addressing
+		const TWord moduloTest = (val & 0xffff);
+
+		if (moduloTest == 0xffff)			// Linear addressing
 		{
 			reg.mModulo[which] = 0;
 			reg.mMask[which] = 0xffffff;
 			return;
 		}
-
-		const TWord moduloTest = (val & 0xffff);
 
 		if (moduloTest == 0)				// Bit reverse
 		{
@@ -1298,50 +1301,20 @@ namespace dsp56k
 		}
 	}
 
-
-	// _____________________________________________________________________________
-	// save
-	//
-	bool DSP::save( FILE* _file ) const
+	TWord DSP::registerInterruptFunc(std::function<void()>&& _func)
 	{
-		fwrite( &reg, sizeof(reg), 1, _file );
-		fwrite( &pcCurrentInstruction, 1, 1, _file );
-		fwrite( &cache, sizeof(cache), 1, _file );
-
-		return true;
-	}
-
-	// _____________________________________________________________________________
-	// load
-	//
-	bool DSP::load( FILE* _file )
-	{
-		fread( &reg, sizeof(reg), 1, _file );
-		fread( &pcCurrentInstruction, 1, 1, _file );
-		fread( &cache, sizeof(cache), 1, _file );
-
-		return true;
+		const auto vba = Vba_End + static_cast<TWord>(m_customInterrupts.size());
+		m_customInterrupts.emplace_back(std::move(_func));
+		return vba;
 	}
 
 	bool DSP::injectInterrupt(uint32_t _interruptVectorAddress)
 	{
-		std::lock_guard lock(m_mutexInsertPendingInterrupt);
+		m_pendingInterrupts.push_back({_interruptVectorAddress});
 
-		m_pendingInterrupts.push_back({_interruptVectorAddress, nullptr});
+		if(m_interruptFunc == m_execPeripheralsFunc)
+			m_interruptFunc = &dspExecInterrupts;
 
-		if(m_interruptFunc == &dspExecNoPendingInterrupts)
-			m_interruptFunc = &dspTryExecInterrupts;
-
-		return true;
-	}
-
-	bool DSP::injectInterrupt(std::function<void()>&& func)
-	{
-		std::lock_guard lock(m_mutexInsertPendingInterrupt);
-		m_pendingInterrupts.push_back({Vba_End, std::move(func)});
-
-		if(m_interruptFunc == &dspExecNoPendingInterrupts)
-			m_interruptFunc = &dspTryExecInterrupts;
 		return true;
 	}
 
@@ -1364,6 +1337,18 @@ namespace dsp56k
 		const auto minPrio = mr().var & 0x3;
 
 		return prio < minPrio;
+	}
+
+	void DSP::injectExternalInterrupt(const TWord _vba)
+	{
+		m_pendingExternalInterrupts.waitNotFull();
+		m_pendingExternalInterrupts.push_back(_vba);
+	}
+
+	void DSP::processExternalInterrupts()
+	{
+		while(!m_pendingExternalInterrupts.empty())
+			injectInterrupt(m_pendingExternalInterrupts.pop_front());
 	}
 
 	void DSP::clearOpcodeCache()
@@ -1548,5 +1533,18 @@ aar0=$000008 aar1=$000000 aar2=$000000 aar3=$000000
 		coreDump(ss);
 		const std::string dump(ss.str());
 		LOG(std::endl << dump);
+	}
+
+	void DSP::op_Wait(const TWord)
+	{
+		while(m_pendingInterrupts.empty())
+		{
+			m_instructions += PeripheralsProcessingStepSize;
+			m_cycles += PeripheralsProcessingStepSize;
+
+			m_execPeripheralsFunc(this);
+		}
+
+		m_interruptFunc = &dspExecInterrupts;
 	}
 }

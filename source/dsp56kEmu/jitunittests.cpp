@@ -50,6 +50,8 @@ namespace dsp56k
 
 		jitDiv();
 		rep_div();
+
+		parallelMoveXY();
 	}
 
 	JitUnittests::~JitUnittests()
@@ -107,7 +109,7 @@ namespace dsp56k
 			config.dynamicPeripheralAddressing = true;
 			config.aguSupportBitreverse = true;
 
-			JitBlock b(m_asm, dsp, rtData, config);
+			JitBlock b(m_asm, dsp, rtData, std::move(config));
 			JitBlockRuntimeData rt;
 			JitOps o(b, rt);
 
@@ -120,6 +122,7 @@ namespace dsp56k
 
 			PushAllUsed pusher(b);
 
+			m_asm.mov(regDspPtr, asmjit::Imm(&dsp.regs()));
 			_build();
 
 			block = nullptr;
@@ -151,7 +154,7 @@ namespace dsp56k
 			if(m_logging)
 				LOG("Running test code");
 
-			func(nullptr, 0xbadbc);
+			func(&dsp.getJit(), 0xbadbc);
 
 			if(m_logging)
 				LOG("Verifying test code");
@@ -204,10 +207,10 @@ namespace dsp56k
 		m_checks[4] = 0xab123456abcdef;
 		m_checks[5] = 0x12123456abcdef;
 
-		const DSPReg regLA(*block, JitDspRegPool::DspLA, true, false);
-		const DSPReg regLC(*block, JitDspRegPool::DspLC, true, false);
-		const DSPReg regSR(*block, JitDspRegPool::DspSR, true, false);
-		const DSPReg regA(*block, JitDspRegPool::DspA, true, false);
+		const DSPReg regLA(*block, PoolReg::DspLA, true, false);
+		const DSPReg regLC(*block, PoolReg::DspLC, true, false);
+		const DSPReg regSR(*block, PoolReg::DspSR, true, false);
+		const DSPReg regA(*block, PoolReg::DspA, true, false);
 		const RegGP ra(*block);
 		const RegGP rb(*block);
 
@@ -613,6 +616,9 @@ namespace dsp56k
 		{
 			m_checks.fill(0);
 
+			dsp.regs().a.var = 0;
+			dsp.regs().b.var = 0;
+
 			int i=0;
 			const RegGP r(*block);
 
@@ -850,7 +856,6 @@ namespace dsp56k
 		dsp.regs().b.var = 0x00ee112233445566;
 
 		dsp.regs().x.var = 0x0000aabbccddeeff;
-		dsp.regs().y.var = 0x0000112233445566;
 
 		const RegGP temp(*block);
 		const auto r = r32(temp.get());
@@ -895,8 +900,6 @@ namespace dsp56k
 
 		ops->getXY0(v32, 0, false);	modify(v32.get());		ops->setXY0(0, v32);
 		ops->getXY1(v32, 0, false);	modify(v32.get());		ops->setXY1(0, v32);
-
-		regs.getXY(r, 1);			modify64(r);		regs.setXY(1, r);
 	}
 
 	void JitUnittests::getSetRegs_verify()
@@ -916,12 +919,11 @@ namespace dsp56k
 		verify(r.b.var == 0x00e1122334455660);
 
 		verify(r.x.var == 0x0000abbcc0deeff0);
-		verify(r.y.var == 0x0000122334455660);
 	}
 
 	void JitUnittests::jitDiv()
 	{
-		constexpr uint64_t expectedValues[24] =
+		static constexpr uint64_t expectedValues[24] =
 		{
 			0xffef590e000000,
 			0xffef790e000000,
@@ -981,7 +983,7 @@ namespace dsp56k
 			dsp.regs().a.var = 0x00008000000000;
 			dsp.setSR(0x0800d4);
 
-			constexpr uint64_t expectedValues[24] =
+			static constexpr uint64_t expectedValues[24] =
 			{
 				0xffdf7214000000,
 				0xffe07214000000,
@@ -1038,6 +1040,23 @@ namespace dsp56k
 		{
 			verify(dsp.regs().a.var == 0xffeadd5401e848);
 			verify(dsp.getSR().var == 0x0800d4);
+		});
+	}
+
+	void JitUnittests::parallelMoveXY()
+	{
+		runTest([&]()
+		{
+			dsp.set_m(0, 0xff);
+			dsp.set_m(4, 0xff);
+
+			emit(0xf09818);	// add a,b		x:(r0)+,x0		y:(r4)+,y0
+			emit(0x950818);	// add a,b		x1,x:(r0)+n0	y1,y:(r4)+n4
+			emit(0xbb9818);	// add a,b		x:(r0)+,a		b,y:(r4)+
+		}, [&]()
+		{
+			dsp.set_m(0, 0xffffff);
+			dsp.set_m(4, 0xffffff);
 		});
 	}
 

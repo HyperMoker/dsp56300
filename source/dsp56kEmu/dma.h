@@ -1,4 +1,5 @@
 #pragma once
+
 #include <array>
 #include <set>
 
@@ -28,10 +29,10 @@ namespace dsp56k
 
 		enum class AddressGenMode
 		{
-			DualCounterDCO0,
-			DualCounterDCO1,
-			DualCounterDCO2,
-			DualCounterDCO3,
+			DualCounterDOR0,
+			DualCounterDOR1,
+			DualCounterDOR2,
+			DualCounterDOR3,
 			SingleCounterAnoUpdate,
 			SingleCounterApostInc,
 			reserved110,
@@ -47,33 +48,46 @@ namespace dsp56k
 			CounterE
 		};
 
-		// Note: This is for DSP56362
 		enum class RequestSource
 		{
-			ExternalIRQA       = 0b00000, // External (IRQA pin)
-			ExternalIRQB       = 0b00001, // External (IRQB pin)
-			ExternalIRQC       = 0b00010, // External (IRQC pin)
-			ExternalIRQD       = 0b00011, // External (IRQD pin)
-			DMAChannel0        = 0b00100, // Transfer done from DMA channel 0
-			DMAChannel1        = 0b00101, // Transfer done from DMA channel 1
-			DMAChannel2        = 0b00110, // Transfer done from DMA channel 2
-			DMAChannel3        = 0b00111, // Transfer done from DMA channel 3
-			DMAChannel4        = 0b01000, // Transfer done from DMA channel 4
-			DMAChannel5        = 0b01001, // Transfer done from DMA channel 5
-			DaxTransmitData    = 0b01010, // DAX transmit data
-			EsaiReceiveData    = 0b01011, // ESAI receive data (RDF=1)
-			EsaiTransmitData   = 0b01100, // ESAI transmit data (TDE=1)
-			ShiHtxEmpty        = 0b01101, // SHI HTX empty
-			ShiFifoNotEmpty    = 0b01110, // SHI FIFO not empty
-			ShiFifoFull        = 0b01111, // SHI FIFO full
-			HostReceiveData    = 0b10000, // Host receive data
-			HostTransmitData   = 0b10001, // Host transmit data
-			Timer0             = 0b10010, // TIMER0 (TCF=1)
-			Timer1             = 0b10011, // TIMER1 (TCF=1)
-			Timer2             = 0b10100, // TIMER2 (TCF=1)
+			ExternalIRQA          = 0b00000, // External (IRQA pin)
+			ExternalIRQB          = 0b00001, // External (IRQB pin)
+			ExternalIRQC          = 0b00010, // External (IRQC pin)
+			ExternalIRQD          = 0b00011, // External (IRQD pin)
+			DMAChannel0           = 0b00100, // Transfer done from DMA channel 0
+			DMAChannel1           = 0b00101, // Transfer done from DMA channel 1
+			DMAChannel2           = 0b00110, // Transfer done from DMA channel 2
+			DMAChannel3           = 0b00111, // Transfer done from DMA channel 3
+			DMAChannel4           = 0b01000, // Transfer done from DMA channel 4
+			DMAChannel5           = 0b01001, // Transfer done from DMA channel 5
 
-			Count
+			// DSP56362
+			DaxTransmitData       = 0b01010, // DAX transmit data
+			EsaiReceiveData       = 0b01011, // ESAI receive data (RDF=1)
+			EsaiTransmitData      = 0b01100, // ESAI transmit data (TDE=1)
+			ShiHtxEmpty           = 0b01101, // SHI HTX empty
+			ShiFifoNotEmpty       = 0b01110, // SHI FIFO not empty
+			ShiFifoFull           = 0b01111, // SHI FIFO full
+			HostReceiveData       = 0b10000, // Host receive data
+			HostTransmitData      = 0b10001, // Host transmit data
+			Timer0                = 0b10010, // TIMER0 (TCF=1)
+			Timer1                = 0b10011, // TIMER1 (TCF=1)
+			Timer2                = 0b10100, // TIMER2 (TCF=1)
+			Dsp56362Reserved      = 0b10101,
+
+			// DSP56303
+			Essi0ReceiveData      = 0b01010, // ESSI0 receive data (RDF0 = 1)
+			Essi0TransmitData     = 0b01011, // ESSI0 transmit data (TDE0 = 1))
+			Essi1ReceiveData      = 0b01100, // ESSI1 receive data (RDF1 = 1)
+			Essi1TransmitData     = 0b01101, // ESSI1 transmit data (TDE1 = 1))
+			Hi08ReceiveDataFull   = 0b10011, // Host receive data full (HRDF = 1)
+			Hi08TransmitDataEmpty = 0b10100, // Host transmit data empty (HTDE = 1)
+			Dsp56303Reserved      = 0b10101,
+
+			Count = Dsp56303Reserved
 		};
+
+		static_assert(RequestSource::Dsp56362Reserved == RequestSource::Dsp56303Reserved, "update definition of Count in request sources");
 
 		enum class TransferMode
 		{
@@ -97,7 +111,7 @@ namespace dsp56k
 		const TWord& getDCO() const;
 		const TWord& getDCR() const;
 
-		void exec();
+		uint32_t exec();
 
 		void triggerByRequest();
 
@@ -115,16 +129,19 @@ namespace dsp56k
 
 		static EMemArea convertMemArea(TWord _space);
 
-		static bool isPeripheralAddr(EMemArea _area, TWord _first, TWord _count);
-		static bool isPeripheralAddr(EMemArea _area, TWord _addr);
+		bool isPeripheralAddr(EMemArea _area, TWord _first, TWord _count) const;
+		bool isPeripheralAddr(EMemArea _area, TWord _addr) const;
 
 		bool bridgedOverlap(EMemArea _area, TWord _first, TWord _count) const;
 
-		void extractDCOHML(TWord& __h, TWord& _m, TWord& _l) const;
+		void extractDCOHML(TWord& _h, TWord& _m, TWord& _l) const;
 
 	private:
 		void memCopy(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
 		void memFill(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
+		void memCopyToFixedDest(EMemArea _dstArea, TWord _dstAddr, EMemArea _srcArea, TWord _srcAddr, TWord _count) const;
+
+		bool dualModeIncrement(TWord& _dst, TWord _dor);
 
 		TWord memRead(EMemArea _area, TWord _addr) const;
 		void memWrite(EMemArea _area, TWord _addr, TWord _value) const;
@@ -153,7 +170,7 @@ namespace dsp56k
 		TWord m_dcolInit = 0;
 
 		int32_t m_pendingTransfer = 0;
-		TWord m_lastClock = 0;
+		uint64_t m_lastClock = 0;
 	};
 
 	class Dma
@@ -189,11 +206,12 @@ namespace dsp56k
 		const TWord& getDCO(const TWord _channel) const { return m_channels[_channel].getDCO(); }
 		const TWord& getDCR(const TWord _channel) const { return m_channels[_channel].getDCR(); }
 
-		void exec();
+		uint32_t exec();
 		void setActiveChannel(TWord _channel);
 		void clearActiveChannel();
 
-		bool trigger(DmaChannel::RequestSource _source);
+		bool hasTrigger(DmaChannel::RequestSource _source) const;
+		bool trigger(DmaChannel::RequestSource _source) const;
 		void addTriggerTarget(DmaChannel* _channel);
 		void removeTriggerTarget(DmaChannel* _channel);
 
